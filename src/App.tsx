@@ -37,7 +37,7 @@ import {
 
 /**
  * AVANZIA GLOBAL - EXPENSE TRACKER
- * VERSION: Production v1.7 (Sharp Text Optimization)
+ * VERSION: Production v1.8 (PDF Generation Fixes)
  */
 
 // --- 1. CONFIGURATION ---
@@ -102,26 +102,41 @@ const useTailwindLoader = () => {
   return ready;
 };
 
+// UPDATED: Sequential Loader to prevent "autoTable not defined" error
 const useExternalScripts = () => {
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    const scripts = [
-      "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
-      "https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.29/jspdf.plugin.autotable.min.js",
-      "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
-      "https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"
-    ];
-    let loadedCount = 0;
-    const checkAllLoaded = () => { loadedCount++; if (loadedCount === scripts.length) setLoaded(true); };
-    scripts.forEach(src => {
-      if (!document.querySelector(`script[src="${src}"]`)) {
-        const script = document.createElement('script');
-        script.src = src;
-        script.async = true;
-        script.onload = checkAllLoaded;
-        document.body.appendChild(script);
-      } else { checkAllLoaded(); }
-    });
+    const loadScript = (src) => {
+        return new Promise((resolve, reject) => {
+            if (document.querySelector(`script[src="${src}"]`)) {
+                resolve();
+                return;
+            }
+            const script = document.createElement('script');
+            script.src = src;
+            script.onload = resolve;
+            script.onerror = reject;
+            document.body.appendChild(script);
+        });
+    };
+
+    const loadAll = async () => {
+        try {
+            // Load core libraries first
+            await Promise.all([
+                loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"),
+                loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"),
+                loadScript("https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js")
+            ]);
+            // Load plugins that depend on core libraries
+            await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.29/jspdf.plugin.autotable.min.js");
+            setLoaded(true);
+        } catch (err) {
+            console.error("Script loading failed", err);
+        }
+    };
+
+    loadAll();
   }, []);
   return loaded;
 };
@@ -163,7 +178,6 @@ const compressImage = (file) => {
         
         // 2. Quality Loop
         // Start high (0.8), reduce quality until fits database (<850KB)
-        // This preserves resolution (sharpness) over artifacting
         let quality = 0.8;
         let dataUrl = canvas.toDataURL('image/jpeg', quality);
         
@@ -515,28 +529,18 @@ export default function AvanziaExpenseTracker() {
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    
-    // UPDATED: Check original size only to prevent massive files, but allow up to 20MB for compression
-    if (file.type.startsWith('image/') && file.size > 20 * 1024 * 1024) { 
-        showNotification("Image too massive (>20MB). Please use a smaller photo.", "error"); 
-        return; 
-    }
-    // PDF strict limit
-    if (file.type === 'application/pdf' && file.size > 900 * 1024) {
-        showNotification("PDF too large. Max 900KB allowed.", "error");
-        return;
-    }
+    if (file.size > 20 * 1024 * 1024) { showNotification("File too large (>20MB).", "error"); return; }
 
     if (file.type === 'application/pdf') {
+        if (file.size > 900 * 1024) { showNotification("PDF too large. Max 900KB.", "error"); return; }
         try { const base64 = await readFileAsBase64(file); setFormData(prev => ({ ...prev, receiptImage: base64, missingReceiptReason: "" })); } 
         catch (err) { showNotification("Error reading PDF", "error"); }
     } else if (file.type.startsWith('image/')) {
         try { 
             showNotification("Compressing image...", "success");
             const compressedBase64 = await compressImage(file); 
-            // Safety check after compression
             if (compressedBase64.length > 1040000) {
-                showNotification("Image too detailed even after compression. Please take a simpler photo.", "error");
+                showNotification("Image too large even after compression.", "error");
                 return;
             }
             setFormData(prev => ({ ...prev, receiptImage: compressedBase64, missingReceiptReason: "" })); 
@@ -648,14 +652,24 @@ export default function AvanziaExpenseTracker() {
         
         for (const item of data) {
             if (!item.receiptImage) continue;
-            const isPdf = item.receiptImage.startsWith('data:application/pdf');
+            // UPDATED: Convert Data URL to ArrayBuffer for embedding
+            // This is the FIX for the "Error generating PDF" issue
+            let imageBytes;
+            let isPdf = false;
+
+            if (item.receiptImage.startsWith('data:application/pdf')) {
+                isPdf = true;
+                imageBytes = await fetch(item.receiptImage).then(res => res.arrayBuffer());
+            } else {
+                imageBytes = await fetch(item.receiptImage).then(res => res.arrayBuffer());
+            }
+
             if (isPdf) {
-                const receiptPdfBytes = await fetch(item.receiptImage).then(res => res.arrayBuffer());
-                const receiptPdf = await PDFDocument.load(receiptPdfBytes);
+                const receiptPdf = await PDFDocument.load(imageBytes);
                 const copiedPages = await finalPdf.copyPages(receiptPdf, receiptPdf.getPageIndices());
                 copiedPages.forEach((page) => finalPdf.addPage(page));
             } else {
-                const jpgImage = await finalPdf.embedJpg(item.receiptImage);
+                const jpgImage = await finalPdf.embedJpg(imageBytes);
                 const page = finalPdf.addPage();
                 page.drawText(`Receipt: ${item.description} - ${formatCurrency(item.amount)}`, { x: 50, y: page.getHeight() - 50, size: 12 });
                 const jpgDims = jpgImage.scale(1);
