@@ -36,7 +36,7 @@ import {
 } from 'lucide-react';
 
 /**
- * AVANZIA GLOBAL - EXPENSE TRACKER (Production v1.4 - Expanded Reporting)
+ * AVANZIA GLOBAL - EXPENSE TRACKER (Production v1.5 - Subtotals)
  */
 
 // --- 1. CONFIGURATION ---
@@ -182,52 +182,55 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
   const reportOptions = [
       { id: 'client', label: 'Client Invoice (Billable Only)' },
       { id: 'client_non_billable', label: 'Client Non-Billable Summary' },
-      { id: 'client_master', label: 'Client Master (All Expenses)' }, // NEW
+      { id: 'client_master', label: 'Client Master (All Expenses)' },
       { id: 'partner', label: 'Partner Reimbursement (Paid by Self)' },
-      { id: 'partner_master', label: 'Partner Master (All Expenses)' }, // NEW
+      { id: 'partner_master', label: 'Partner Master (All Expenses)' },
       { id: 'avanzia_general', label: 'Avanzia General Account (Consolidated)' },
       { id: 'monthly_master', label: 'Monthly Master Report (All)' },
   ];
 
   // Filtering Logic
   const reportData = expenses.filter(item => {
-      // 1. Month Filter
       if (!item.date.startsWith(selectedMonth)) return false;
 
-      // 2. Specific Logic
       switch (filterType) {
           case 'client':
               if (item.category !== 'billable') return false;
               return item.client === selectedEntity;
-          
           case 'client_non_billable':
               if (item.category !== 'non_billable') return false;
               if (selectedEntity && selectedEntity !== 'All') return item.client === selectedEntity;
               return true;
-
-          case 'client_master': // NEW: Everything for this client
+          case 'client_master':
               return item.client === selectedEntity;
-
           case 'partner':
               if (item.paymentMode !== "Paid by Self / Partner") return false;
               return item.partner === selectedEntity;
-
-          case 'partner_master': // NEW: Everything for this partner
+          case 'partner_master':
               return item.partner === selectedEntity;
-
           case 'avanzia_general':
               const generalCategories = ['company_general', 'capex_general', 'non_billable'];
               return generalCategories.includes(item.category);
-
           case 'monthly_master':
               return true;
-
           default:
               return false;
       }
   });
 
   const totalVal = reportData.reduce((acc, curr) => acc + curr.amount, 0);
+
+  // Subtotal Calculations for UI
+  let subtotals = null;
+  if (filterType === 'partner_master') {
+      const self = reportData.filter(i => i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
+      const company = totalVal - self;
+      subtotals = { 'Paid by Partner (Self)': self, 'Paid by Company': company };
+  } else if (filterType === 'client_master') {
+      const billable = reportData.filter(i => i.category === 'billable').reduce((a, c) => a + c.amount, 0);
+      const nonBillable = totalVal - billable;
+      subtotals = { 'Billable': billable, 'Non-Billable': nonBillable };
+  }
 
   return (
       <div className="space-y-8">
@@ -271,15 +274,29 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                   )}
               </div>
 
-              <div className="bg-gray-100 p-4 rounded-md mb-6 flex justify-between items-center border">
-                  <div>
-                      <span className="text-xs text-gray-500 uppercase font-bold block">Selected Report Scope</span>
-                      <span className="text-sm text-gray-700">{reportOptions.find(r => r.id === filterType)?.label} - {selectedMonth}</span>
+              {/* Total Display */}
+              <div className="bg-gray-100 p-4 rounded-md mb-6 border">
+                  <div className="flex justify-between items-center">
+                      <div>
+                          <span className="text-xs text-gray-500 uppercase font-bold block">Selected Report Scope</span>
+                          <span className="text-sm text-gray-700">{reportOptions.find(r => r.id === filterType)?.label} - {selectedMonth}</span>
+                      </div>
+                      <div className="text-right">
+                          <span className="text-xs text-gray-500 uppercase font-bold block">Grand Total</span>
+                          <span className="text-xl font-bold text-gray-800">{formatCurrency(totalVal)}</span>
+                      </div>
                   </div>
-                  <div className="text-right">
-                      <span className="text-xs text-gray-500 uppercase font-bold block">Total Value</span>
-                      <span className="text-xl font-bold text-gray-800">{formatCurrency(totalVal)}</span>
-                  </div>
+                  {/* UI Breakdown */}
+                  {subtotals && (
+                      <div className="mt-4 pt-3 border-t border-gray-200 grid grid-cols-2 gap-4">
+                          {Object.entries(subtotals).map(([label, val]) => (
+                              <div key={label} className="text-right">
+                                  <span className="text-xs text-gray-500 uppercase font-bold block">{label}</span>
+                                  <span className="text-sm font-semibold text-blue-700">{formatCurrency(val)}</span>
+                              </div>
+                          ))}
+                      </div>
+                  )}
               </div>
 
               <div className="flex gap-4">
@@ -531,6 +548,31 @@ export default function AvanziaExpenseTracker() {
         doc.setFontSize(18); doc.setTextColor(41, 50, 65); doc.text("Avanzia Global Private Limited", 14, 20);
         doc.setFontSize(12); doc.setTextColor(100); doc.text(title, 14, 28); doc.text(`Generated: ${new Date().toLocaleDateString()}`, 14, 34);
         
+        // --- Add Subtotals to PDF ---
+        let startY = 40;
+        
+        if (title.includes("PARTNER_MASTER")) {
+            const self = data.filter(i => i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
+            const company = data.filter(i => !i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
+            
+            doc.setFontSize(10);
+            doc.setTextColor(50);
+            doc.text(`Subtotal (Paid by Partner): ${formatCurrency(self)}`, 14, startY);
+            startY += 5;
+            doc.text(`Subtotal (Paid by Company): ${formatCurrency(company)}`, 14, startY);
+            startY += 10;
+        } else if (title.includes("CLIENT_MASTER")) {
+            const billable = data.filter(i => i.category === 'billable').reduce((a, c) => a + c.amount, 0);
+            const nonBillable = data.reduce((acc, curr) => acc + curr.amount, 0) - billable;
+            
+            doc.setFontSize(10);
+            doc.setTextColor(50);
+            doc.text(`Subtotal (Billable): ${formatCurrency(billable)}`, 14, startY);
+            startY += 5;
+            doc.text(`Subtotal (Non-Billable): ${formatCurrency(nonBillable)}`, 14, startY);
+            startY += 10;
+        }
+
         const tableColumn = ["Date", "Partner", "Client", "Category", "Mode", "Desc", "Amount (INR)"];
         const tableRows = [];
         let totalAmount = 0;
@@ -548,7 +590,7 @@ export default function AvanziaExpenseTracker() {
         });
         tableRows.push(["", "", "", "", "", "TOTAL", formatCurrency(totalAmount)]);
         
-        doc.autoTable({ head: [tableColumn], body: tableRows, startY: 40, theme: 'grid', headStyles: { fillColor: [66, 133, 244] } });
+        doc.autoTable({ head: [tableColumn], body: tableRows, startY: startY, theme: 'grid', headStyles: { fillColor: [66, 133, 244] } });
         
         const tablePdfBytes = doc.output('arraybuffer');
         const finalPdf = await PDFDocument.load(tablePdfBytes);
@@ -582,11 +624,30 @@ export default function AvanziaExpenseTracker() {
   const generateExcel = (data, filename) => {
     if (!window.XLSX) { showNotification("Excel Library loading... wait 5s.", "error"); return; }
     const XLSX = window.XLSX;
-    const ws = XLSX.utils.json_to_sheet(data.map(item => ({
+    
+    // Base data
+    const rowData = data.map(item => ({
         Date: item.date, Partner: item.partner, Client: item.client, Head: item.head, Category: CATEGORIES.find(c => c.id === item.category)?.label,
         Description: item.description, Amount: item.amount, GST_Component: item.gstAmount || 0, Debited_Base: (item.category.includes('partner') ? (item.amount - (item.gstAmount || 0)) : item.amount),
         Payment_Mode: item.paymentMode, Receipt_Type: item.receiptImage ? (item.receiptImage.startsWith('data:application/pdf') ? 'PDF' : 'Image') : "Missing", Missing_Reason: item.missingReceiptReason
-    })));
+    }));
+
+    // Add Summary Rows for Excel
+    if (filename.includes("Partner_Master")) {
+        const self = data.filter(i => i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
+        const company = data.filter(i => !i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
+        rowData.push({}); // Empty row
+        rowData.push({ Description: "SUBTOTAL (Paid by Self)", Amount: self });
+        rowData.push({ Description: "SUBTOTAL (Paid by Company)", Amount: company });
+    } else if (filename.includes("Client_Master")) {
+        const billable = data.filter(i => i.category === 'billable').reduce((a, c) => a + c.amount, 0);
+        const nonBillable = data.reduce((acc, curr) => acc + curr.amount, 0) - billable;
+        rowData.push({}); // Empty row
+        rowData.push({ Description: "SUBTOTAL (Billable)", Amount: billable });
+        rowData.push({ Description: "SUBTOTAL (Non-Billable)", Amount: nonBillable });
+    }
+
+    const ws = XLSX.utils.json_to_sheet(rowData);
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Expenses"); XLSX.writeFile(wb, `${filename}.xlsx`);
   };
 
