@@ -37,7 +37,7 @@ import {
 
 /**
  * AVANZIA GLOBAL - EXPENSE TRACKER
- * VERSION: Production v1.8 (PDF Generation Fixes)
+ * VERSION: Production v1.9 (Robust PDF Image Embedding)
  */
 
 // --- 1. CONFIGURATION ---
@@ -102,41 +102,26 @@ const useTailwindLoader = () => {
   return ready;
 };
 
-// UPDATED: Sequential Loader to prevent "autoTable not defined" error
 const useExternalScripts = () => {
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    const loadScript = (src) => {
-        return new Promise((resolve, reject) => {
-            if (document.querySelector(`script[src="${src}"]`)) {
-                resolve();
-                return;
-            }
-            const script = document.createElement('script');
-            script.src = src;
-            script.onload = resolve;
-            script.onerror = reject;
-            document.body.appendChild(script);
-        });
-    };
-
-    const loadAll = async () => {
-        try {
-            // Load core libraries first
-            await Promise.all([
-                loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"),
-                loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"),
-                loadScript("https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js")
-            ]);
-            // Load plugins that depend on core libraries
-            await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.29/jspdf.plugin.autotable.min.js");
-            setLoaded(true);
-        } catch (err) {
-            console.error("Script loading failed", err);
-        }
-    };
-
-    loadAll();
+    const scripts = [
+      "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
+      "https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.29/jspdf.plugin.autotable.min.js",
+      "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
+      "https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"
+    ];
+    let loadedCount = 0;
+    const checkAllLoaded = () => { loadedCount++; if (loadedCount === scripts.length) setLoaded(true); };
+    scripts.forEach(src => {
+      if (!document.querySelector(`script[src="${src}"]`)) {
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = true;
+        script.onload = checkAllLoaded;
+        document.body.appendChild(script);
+      } else { checkAllLoaded(); }
+    });
   }, []);
   return loaded;
 };
@@ -669,14 +654,29 @@ export default function AvanziaExpenseTracker() {
                 const copiedPages = await finalPdf.copyPages(receiptPdf, receiptPdf.getPageIndices());
                 copiedPages.forEach((page) => finalPdf.addPage(page));
             } else {
-                const jpgImage = await finalPdf.embedJpg(imageBytes);
+                let imageToEmbed;
+                try {
+                    // Try JPEG first
+                    imageToEmbed = await finalPdf.embedJpg(imageBytes);
+                } catch (e) {
+                    console.warn("JPEG embed failed, trying PNG fallback...", e);
+                    try {
+                        // Fallback to PNG
+                        imageToEmbed = await finalPdf.embedPng(imageBytes);
+                    } catch (e2) {
+                        console.error("Image embedding failed completely. Skipping image.", e2);
+                        continue; // Skip this specific image but keep generating the rest of the report
+                    }
+                }
+
                 const page = finalPdf.addPage();
                 page.drawText(`Receipt: ${item.description} - ${formatCurrency(item.amount)}`, { x: 50, y: page.getHeight() - 50, size: 12 });
-                const jpgDims = jpgImage.scale(1);
+                
+                const imgDims = imageToEmbed.scale(1);
                 const pageWidth = page.getWidth(); const pageHeight = page.getHeight(); const margin = 50;
-                let w = jpgDims.width; let h = jpgDims.height; const maxWidth = pageWidth - (margin * 2); const maxHeight = pageHeight - (margin * 2) - 60;
+                let w = imgDims.width; let h = imgDims.height; const maxWidth = pageWidth - (margin * 2); const maxHeight = pageHeight - (margin * 2) - 60;
                 const scale = Math.min(maxWidth / w, maxHeight / h, 1);
-                page.drawImage(jpgImage, { x: margin, y: pageHeight - margin - 60 - (h * scale), width: w * scale, height: h * scale });
+                page.drawImage(imageToEmbed, { x: margin, y: pageHeight - margin - 60 - (h * scale), width: w * scale, height: h * scale });
             }
         }
         const pdfBytes = await finalPdf.save();
