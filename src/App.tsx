@@ -37,7 +37,7 @@ import {
 
 /**
  * AVANZIA GLOBAL - EXPENSE TRACKER
- * VERSION: Production v1.9 (Robust PDF Image Embedding)
+ * VERSION: Production v1.10 (Ultra-Robust PDF Generator)
  */
 
 // --- 1. CONFIGURATION ---
@@ -126,7 +126,7 @@ const useExternalScripts = () => {
   return loaded;
 };
 
-// UPDATED: High-Fidelity Compressor
+// UPDATED: High-Fidelity Compressor with stricter output
 const compressImage = (file) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -156,13 +156,14 @@ const compressImage = (file) => {
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext('2d');
+        ctx.fillStyle = "#FFFFFF"; // Ensure white background for transparency
+        ctx.fillRect(0, 0, width, height);
         // Better smoothing for text
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, width, height);
         
         // 2. Quality Loop
-        // Start high (0.8), reduce quality until fits database (<850KB)
         let quality = 0.8;
         let dataUrl = canvas.toDataURL('image/jpeg', quality);
         
@@ -577,6 +578,7 @@ export default function AvanziaExpenseTracker() {
     catch (err) { showNotification("Error deleting record", "error"); }
   };
 
+  // UPDATED: Robust PDF Generator (Isolates bad images)
   const generatePDF = async (data, title) => {
     if (!window.jspdf || !window.PDFLib) { showNotification("Libraries loading... please wait 5s and try again.", "error"); return; }
     setLoading(true);
@@ -590,27 +592,18 @@ export default function AvanziaExpenseTracker() {
         
         // --- Add Subtotals to PDF ---
         let startY = 40;
-        
         if (title.includes("PARTNER_MASTER")) {
             const self = data.filter(i => i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
             const company = data.filter(i => !i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
-            
-            doc.setFontSize(10);
-            doc.setTextColor(50);
-            doc.text(`Subtotal (Paid by Partner): ${formatCurrency(self)}`, 14, startY);
-            startY += 5;
-            doc.text(`Subtotal (Paid by Company): ${formatCurrency(company)}`, 14, startY);
-            startY += 10;
+            doc.setFontSize(10); doc.setTextColor(50);
+            doc.text(`Subtotal (Paid by Partner): ${formatCurrency(self)}`, 14, startY); startY += 5;
+            doc.text(`Subtotal (Paid by Company): ${formatCurrency(company)}`, 14, startY); startY += 10;
         } else if (title.includes("CLIENT_MASTER")) {
             const billable = data.filter(i => i.category === 'billable').reduce((a, c) => a + c.amount, 0);
             const nonBillable = data.reduce((acc, curr) => acc + curr.amount, 0) - billable;
-            
-            doc.setFontSize(10);
-            doc.setTextColor(50);
-            doc.text(`Subtotal (Billable): ${formatCurrency(billable)}`, 14, startY);
-            startY += 5;
-            doc.text(`Subtotal (Non-Billable): ${formatCurrency(nonBillable)}`, 14, startY);
-            startY += 10;
+            doc.setFontSize(10); doc.setTextColor(50);
+            doc.text(`Subtotal (Billable): ${formatCurrency(billable)}`, 14, startY); startY += 5;
+            doc.text(`Subtotal (Non-Billable): ${formatCurrency(nonBillable)}`, 14, startY); startY += 10;
         }
 
         const tableColumn = ["Date", "Partner", "Client", "Category", "Mode", "Desc", "Amount (INR)"];
@@ -619,13 +612,8 @@ export default function AvanziaExpenseTracker() {
         data.forEach(item => {
             totalAmount += item.amount;
             tableRows.push([
-                item.date, 
-                item.partner, 
-                item.client || '-', 
-                item.category.replace('_', ' '),
-                item.paymentMode.includes('Self') ? 'Self' : 'Company',
-                item.description, 
-                formatCurrency(item.amount)
+                item.date, item.partner, item.client || '-', item.category.replace('_', ' '),
+                item.paymentMode.includes('Self') ? 'Self' : 'Company', item.description, formatCurrency(item.amount)
             ]);
         });
         tableRows.push(["", "", "", "", "", "TOTAL", formatCurrency(totalAmount)]);
@@ -635,55 +623,50 @@ export default function AvanziaExpenseTracker() {
         const tablePdfBytes = doc.output('arraybuffer');
         const finalPdf = await PDFDocument.load(tablePdfBytes);
         
+        // --- Image Embedding Loop (With individual error handling) ---
         for (const item of data) {
             if (!item.receiptImage) continue;
-            // UPDATED: Convert Data URL to ArrayBuffer for embedding
-            // This is the FIX for the "Error generating PDF" issue
-            let imageBytes;
-            let isPdf = false;
-
-            if (item.receiptImage.startsWith('data:application/pdf')) {
-                isPdf = true;
-                imageBytes = await fetch(item.receiptImage).then(res => res.arrayBuffer());
-            } else {
-                imageBytes = await fetch(item.receiptImage).then(res => res.arrayBuffer());
-            }
-
-            if (isPdf) {
-                const receiptPdf = await PDFDocument.load(imageBytes);
-                const copiedPages = await finalPdf.copyPages(receiptPdf, receiptPdf.getPageIndices());
-                copiedPages.forEach((page) => finalPdf.addPage(page));
-            } else {
-                let imageToEmbed;
-                try {
-                    // Try JPEG first
-                    imageToEmbed = await finalPdf.embedJpg(imageBytes);
-                } catch (e) {
-                    console.warn("JPEG embed failed, trying PNG fallback...", e);
-                    try {
-                        // Fallback to PNG
-                        imageToEmbed = await finalPdf.embedPng(imageBytes);
-                    } catch (e2) {
-                        console.error("Image embedding failed completely. Skipping image.", e2);
-                        continue; // Skip this specific image but keep generating the rest of the report
-                    }
-                }
-
-                const page = finalPdf.addPage();
-                page.drawText(`Receipt: ${item.description} - ${formatCurrency(item.amount)}`, { x: 50, y: page.getHeight() - 50, size: 12 });
+            try {
+                // Determine format based on prefix to prevent guessing games
+                const isPdf = item.receiptImage.startsWith('data:application/pdf');
+                const isPng = item.receiptImage.startsWith('data:image/png');
+                // Assume JPEG if image but not PNG (our compressor defaults to JPEG)
                 
-                const imgDims = imageToEmbed.scale(1);
-                const pageWidth = page.getWidth(); const pageHeight = page.getHeight(); const margin = 50;
-                let w = imgDims.width; let h = imgDims.height; const maxWidth = pageWidth - (margin * 2); const maxHeight = pageHeight - (margin * 2) - 60;
-                const scale = Math.min(maxWidth / w, maxHeight / h, 1);
-                page.drawImage(imageToEmbed, { x: margin, y: pageHeight - margin - 60 - (h * scale), width: w * scale, height: h * scale });
+                const imageBytes = await fetch(item.receiptImage).then(res => res.arrayBuffer());
+
+                if (isPdf) {
+                    const receiptPdf = await PDFDocument.load(imageBytes);
+                    const copiedPages = await finalPdf.copyPages(receiptPdf, receiptPdf.getPageIndices());
+                    copiedPages.forEach((page) => finalPdf.addPage(page));
+                } else {
+                    let imageToEmbed;
+                    if (isPng) {
+                        imageToEmbed = await finalPdf.embedPng(imageBytes);
+                    } else {
+                        // Default to JPEG (safest for camera photos processed by canvas)
+                        imageToEmbed = await finalPdf.embedJpg(imageBytes);
+                    }
+
+                    const page = finalPdf.addPage();
+                    page.drawText(`Receipt: ${item.description} - ${formatCurrency(item.amount)}`, { x: 50, y: page.getHeight() - 50, size: 12 });
+                    
+                    const imgDims = imageToEmbed.scale(1);
+                    const pageWidth = page.getWidth(); const pageHeight = page.getHeight(); const margin = 50;
+                    let w = imgDims.width; let h = imgDims.height; const maxWidth = pageWidth - (margin * 2); const maxHeight = pageHeight - (margin * 2) - 60;
+                    const scale = Math.min(maxWidth / w, maxHeight / h, 1);
+                    page.drawImage(imageToEmbed, { x: margin, y: pageHeight - margin - 60 - (h * scale), width: w * scale, height: h * scale });
+                }
+            } catch (innerErr) {
+                console.warn(`Skipping corrupt/incompatible image for item: ${item.description}`, innerErr);
+                // We continue to the next item instead of crashing the report
+                continue;
             }
         }
         const pdfBytes = await finalPdf.save();
         const blob = new Blob([pdfBytes], { type: "application/pdf" });
         const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `${title.replace(/\s+/g, '_')}.pdf`; link.click();
         showNotification("PDF Report Generated!");
-    } catch (err) { console.error(err); showNotification("Error generating PDF.", "error"); } finally { setLoading(false); }
+    } catch (err) { console.error(err); showNotification("Error generating PDF. Check console.", "error"); } finally { setLoading(false); }
   };
 
   const generateExcel = (data, filename) => {
