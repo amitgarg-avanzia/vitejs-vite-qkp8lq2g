@@ -31,12 +31,12 @@ import {
   Loader2,
   Table,
   XCircle,
-  Pencil, // Added for Edit
+  Pencil,
   Calendar
 } from 'lucide-react';
 
 /**
- * AVANZIA GLOBAL - EXPENSE TRACKER (Production v1.3 - Edit & Advanced Reports)
+ * AVANZIA GLOBAL - EXPENSE TRACKER (Production v1.4 - Expanded Reporting)
  */
 
 // --- 1. CONFIGURATION ---
@@ -177,23 +177,24 @@ const Button = ({ children, onClick, variant = 'primary', className = '', disabl
 const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
   const [filterType, setFilterType] = useState('client');
   const [selectedEntity, setSelectedEntity] = useState('');
-  // Month Selection state
-  const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
 
   const reportOptions = [
       { id: 'client', label: 'Client Invoice (Billable Only)' },
       { id: 'client_non_billable', label: 'Client Non-Billable Summary' },
+      { id: 'client_master', label: 'Client Master (All Expenses)' }, // NEW
       { id: 'partner', label: 'Partner Reimbursement (Paid by Self)' },
+      { id: 'partner_master', label: 'Partner Master (All Expenses)' }, // NEW
       { id: 'avanzia_general', label: 'Avanzia General Account (Consolidated)' },
       { id: 'monthly_master', label: 'Monthly Master Report (All)' },
   ];
 
   // Filtering Logic
   const reportData = expenses.filter(item => {
-      // 1. Month Filter (Apply to all report types)
+      // 1. Month Filter
       if (!item.date.startsWith(selectedMonth)) return false;
 
-      // 2. Specific Logic per Report Type
+      // 2. Specific Logic
       switch (filterType) {
           case 'client':
               if (item.category !== 'billable') return false;
@@ -202,19 +203,24 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
           case 'client_non_billable':
               if (item.category !== 'non_billable') return false;
               if (selectedEntity && selectedEntity !== 'All') return item.client === selectedEntity;
-              return true; // Show all if no specific client selected or handled by grouping
+              return true;
+
+          case 'client_master': // NEW: Everything for this client
+              return item.client === selectedEntity;
 
           case 'partner':
               if (item.paymentMode !== "Paid by Self / Partner") return false;
               return item.partner === selectedEntity;
 
+          case 'partner_master': // NEW: Everything for this partner
+              return item.partner === selectedEntity;
+
           case 'avanzia_general':
-              // Logic: Include Company General + Capex General + Client Non-Billable
               const generalCategories = ['company_general', 'capex_general', 'non_billable'];
               return generalCategories.includes(item.category);
 
           case 'monthly_master':
-              return true; // Everything for the month
+              return true;
 
           default:
               return false;
@@ -232,7 +238,6 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
               </h2>
               
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-                  {/* Month Selector */}
                   <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Select Month</label>
                       <input 
@@ -243,7 +248,6 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                       />
                   </div>
 
-                  {/* Report Type Selector */}
                   <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Report Type</label>
                       <select className="w-full border p-2 rounded-md bg-white" value={filterType} onChange={(e) => {setFilterType(e.target.value); setSelectedEntity('');}}>
@@ -251,8 +255,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                       </select>
                   </div>
 
-                  {/* Entity Selector (Context Aware) */}
-                  {(filterType === 'client' || filterType === 'partner' || filterType === 'client_non_billable') && (
+                  {(filterType.includes('client') || filterType.includes('partner')) && (
                       <div>
                           <label className="block text-sm font-medium text-gray-700 mb-1">
                               Select {filterType.includes('client') ? 'Client' : 'Partner'}
@@ -268,7 +271,6 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                   )}
               </div>
 
-              {/* Total Display */}
               <div className="bg-gray-100 p-4 rounded-md mb-6 flex justify-between items-center border">
                   <div>
                       <span className="text-xs text-gray-500 uppercase font-bold block">Selected Report Scope</span>
@@ -282,7 +284,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
 
               <div className="flex gap-4">
                   <Button variant="primary" disabled={reportData.length === 0} onClick={() => generatePDF(reportData, `${filterType.toUpperCase()} Report - ${selectedMonth}`)}>
-                      <Download className="w-4 h-4" /> Download Report PDF
+                      <Download className="w-4 h-4" /> Download PDF
                   </Button>
                   <Button variant="secondary" disabled={reportData.length === 0} onClick={() => generateExcel(reportData, `Report_${filterType}_${selectedMonth}`)}>
                       <FileText className="w-4 h-4" /> Export Excel
@@ -290,7 +292,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
               </div>
           </div>
           
-          {/* ALL DATA VIEW (Fix for "Data not showing") */}
+          {/* ALL DATA VIEW */}
           <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 overflow-hidden">
               <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2">
                 <Table className="w-5 h-5 text-gray-600" /> Preview: Report Data ({reportData.length} items)
@@ -302,7 +304,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                             <th className="px-4 py-3 font-medium text-gray-600">Date</th>
                             <th className="px-4 py-3 font-medium text-gray-600">Partner</th>
                             <th className="px-4 py-3 font-medium text-gray-600">Client</th>
-                            <th className="px-4 py-3 font-medium text-gray-600">Head</th>
+                            <th className="px-4 py-3 font-medium text-gray-600">Mode</th>
                             <th className="px-4 py-3 font-medium text-gray-600">Category</th>
                             <th className="px-4 py-3 font-medium text-gray-600 text-right">Amount</th>
                         </tr>
@@ -316,7 +318,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                                     <td className="px-4 py-3">{item.date}</td>
                                     <td className="px-4 py-3">{item.partner}</td>
                                     <td className="px-4 py-3">{item.client || '-'}</td>
-                                    <td className="px-4 py-3">{item.head}</td>
+                                    <td className="px-4 py-3 text-xs">{item.paymentMode.includes('Self') ? 'Self' : 'Company'}</td>
                                     <td className="px-4 py-3 text-xs uppercase text-gray-500">{item.category.replace('_', ' ')}</td>
                                     <td className="px-4 py-3 text-right font-mono font-medium">{formatCurrency(item.amount)}</td>
                                 </tr>
@@ -384,11 +386,8 @@ export default function AvanziaExpenseTracker() {
   const [clients, setClients] = useState(INITIAL_CLIENTS);
   const [loading, setLoading] = useState(false);
   const [notification, setNotification] = useState(null);
-  
-  // Edit Mode State
   const [editingId, setEditingId] = useState(null);
   
-  // Load Styles and Libs
   const stylesLoaded = useTailwindLoader(); 
   const libsLoaded = useExternalScripts();
 
@@ -500,12 +499,10 @@ export default function AvanziaExpenseTracker() {
       };
       
       if (editingId) {
-          // UPDATE Existing
           await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'avanzia_expenses', editingId), payload);
           showNotification("Expense updated successfully!");
           setEditingId(null);
       } else {
-          // CREATE New
           await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'avanzia_expenses'), payload);
           showNotification("Expense saved successfully!"); 
       }
@@ -534,7 +531,7 @@ export default function AvanziaExpenseTracker() {
         doc.setFontSize(18); doc.setTextColor(41, 50, 65); doc.text("Avanzia Global Private Limited", 14, 20);
         doc.setFontSize(12); doc.setTextColor(100); doc.text(title, 14, 28); doc.text(`Generated: ${new Date().toLocaleDateString()}`, 14, 34);
         
-        const tableColumn = ["Date", "Partner", "Client", "Category", "Desc", "Amount (INR)"];
+        const tableColumn = ["Date", "Partner", "Client", "Category", "Mode", "Desc", "Amount (INR)"];
         const tableRows = [];
         let totalAmount = 0;
         data.forEach(item => {
@@ -543,12 +540,13 @@ export default function AvanziaExpenseTracker() {
                 item.date, 
                 item.partner, 
                 item.client || '-', 
-                item.category.replace('_', ' '), 
+                item.category.replace('_', ' '),
+                item.paymentMode.includes('Self') ? 'Self' : 'Company',
                 item.description, 
                 formatCurrency(item.amount)
             ]);
         });
-        tableRows.push(["", "", "", "", "TOTAL", formatCurrency(totalAmount)]);
+        tableRows.push(["", "", "", "", "", "TOTAL", formatCurrency(totalAmount)]);
         
         doc.autoTable({ head: [tableColumn], body: tableRows, startY: 40, theme: 'grid', headStyles: { fillColor: [66, 133, 244] } });
         
