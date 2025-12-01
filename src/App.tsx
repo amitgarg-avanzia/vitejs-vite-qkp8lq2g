@@ -36,7 +36,8 @@ import {
 } from 'lucide-react';
 
 /**
- * AVANZIA GLOBAL - EXPENSE TRACKER (Production v1.5 - Subtotals)
+ * AVANZIA GLOBAL - EXPENSE TRACKER
+ * VERSION: Production v1.7 (Sharp Text Optimization)
  */
 
 // --- 1. CONFIGURATION ---
@@ -125,6 +126,7 @@ const useExternalScripts = () => {
   return loaded;
 };
 
+// UPDATED: High-Fidelity Compressor
 const compressImage = (file) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -134,13 +136,43 @@ const compressImage = (file) => {
       img.src = event.target.result;
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 800;
-        const scaleSize = MAX_WIDTH / img.width;
-        canvas.width = MAX_WIDTH;
-        canvas.height = img.height * scaleSize;
+        let width = img.width;
+        let height = img.height;
+        
+        // 1. Increased Max Dimension to 1600px (Better for Text)
+        const MAX_DIMENSION = 1600; 
+        if (width > height) {
+            if (width > MAX_DIMENSION) {
+                height *= MAX_DIMENSION / width;
+                width = MAX_DIMENSION;
+            }
+        } else {
+            if (height > MAX_DIMENSION) {
+                width *= MAX_DIMENSION / height;
+                height = MAX_DIMENSION;
+            }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
         const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL('image/jpeg', 0.5));
+        // Better smoothing for text
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, width, height);
+        
+        // 2. Quality Loop
+        // Start high (0.8), reduce quality until fits database (<850KB)
+        // This preserves resolution (sharpness) over artifacting
+        let quality = 0.8;
+        let dataUrl = canvas.toDataURL('image/jpeg', quality);
+        
+        while (dataUrl.length > 850000 && quality > 0.2) {
+            quality -= 0.1;
+            dataUrl = canvas.toDataURL('image/jpeg', quality);
+        }
+        
+        resolve(dataUrl);
       };
       img.onerror = (err) => reject(err);
     };
@@ -483,13 +515,32 @@ export default function AvanziaExpenseTracker() {
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    if (file.size > 1024 * 1024) { showNotification("File too large. Please use an image/pdf under 1MB.", "error"); return; }
+    
+    // UPDATED: Check original size only to prevent massive files, but allow up to 20MB for compression
+    if (file.type.startsWith('image/') && file.size > 20 * 1024 * 1024) { 
+        showNotification("Image too massive (>20MB). Please use a smaller photo.", "error"); 
+        return; 
+    }
+    // PDF strict limit
+    if (file.type === 'application/pdf' && file.size > 900 * 1024) {
+        showNotification("PDF too large. Max 900KB allowed.", "error");
+        return;
+    }
 
     if (file.type === 'application/pdf') {
         try { const base64 = await readFileAsBase64(file); setFormData(prev => ({ ...prev, receiptImage: base64, missingReceiptReason: "" })); } 
         catch (err) { showNotification("Error reading PDF", "error"); }
     } else if (file.type.startsWith('image/')) {
-        try { const compressedBase64 = await compressImage(file); setFormData(prev => ({ ...prev, receiptImage: compressedBase64, missingReceiptReason: "" })); } 
+        try { 
+            showNotification("Compressing image...", "success");
+            const compressedBase64 = await compressImage(file); 
+            // Safety check after compression
+            if (compressedBase64.length > 1040000) {
+                showNotification("Image too detailed even after compression. Please take a simpler photo.", "error");
+                return;
+            }
+            setFormData(prev => ({ ...prev, receiptImage: compressedBase64, missingReceiptReason: "" })); 
+        } 
         catch (err) { showNotification("Error processing image", "error"); }
     } else { showNotification("Unsupported file type. Use Image or PDF.", "error"); }
   };
