@@ -37,7 +37,7 @@ import {
 
 /**
  * AVANZIA GLOBAL - EXPENSE TRACKER
- * VERSION: Production v1.10 (Ultra-Robust PDF Generator)
+ * VERSION: Production v1.12 (Mobile PDF Crash Fix)
  */
 
 // --- 1. CONFIGURATION ---
@@ -126,7 +126,18 @@ const useExternalScripts = () => {
   return loaded;
 };
 
-// UPDATED: High-Fidelity Compressor with stricter output
+// NEW HELPER: Robust Base64 to ArrayBuffer converter
+// This avoids using 'fetch' on data URLs which crashes mobile browsers
+const base64ToUint8Array = (base64) => {
+  const raw = window.atob(base64.split(',')[1]);
+  const rawLength = raw.length;
+  const array = new Uint8Array(new ArrayBuffer(rawLength));
+  for (let i = 0; i < rawLength; i++) {
+    array[i] = raw.charCodeAt(i);
+  }
+  return array;
+};
+
 const compressImage = (file) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -139,7 +150,7 @@ const compressImage = (file) => {
         let width = img.width;
         let height = img.height;
         
-        // 1. Increased Max Dimension to 1600px (Better for Text)
+        // Max 1600px for legibility
         const MAX_DIMENSION = 1600; 
         if (width > height) {
             if (width > MAX_DIMENSION) {
@@ -156,22 +167,19 @@ const compressImage = (file) => {
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext('2d');
-        ctx.fillStyle = "#FFFFFF"; // Ensure white background for transparency
+        ctx.fillStyle = "#FFFFFF"; 
         ctx.fillRect(0, 0, width, height);
-        // Better smoothing for text
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, width, height);
         
-        // 2. Quality Loop
         let quality = 0.8;
         let dataUrl = canvas.toDataURL('image/jpeg', quality);
-        
+        // Limit to ~850KB
         while (dataUrl.length > 850000 && quality > 0.2) {
             quality -= 0.1;
             dataUrl = canvas.toDataURL('image/jpeg', quality);
         }
-        
         resolve(dataUrl);
       };
       img.onerror = (err) => reject(err);
@@ -225,24 +233,27 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
   const reportData = expenses.filter(item => {
       if (!item.date.startsWith(selectedMonth)) return false;
 
+      const safeCategory = item.category || '';
+      const safePaymentMode = item.paymentMode || '';
+
       switch (filterType) {
           case 'client':
-              if (item.category !== 'billable') return false;
+              if (safeCategory !== 'billable') return false;
               return item.client === selectedEntity;
           case 'client_non_billable':
-              if (item.category !== 'non_billable') return false;
+              if (safeCategory !== 'non_billable') return false;
               if (selectedEntity && selectedEntity !== 'All') return item.client === selectedEntity;
               return true;
           case 'client_master':
               return item.client === selectedEntity;
           case 'partner':
-              if (item.paymentMode !== "Paid by Self / Partner") return false;
+              if (!safePaymentMode.includes("Self")) return false;
               return item.partner === selectedEntity;
           case 'partner_master':
               return item.partner === selectedEntity;
           case 'avanzia_general':
               const generalCategories = ['company_general', 'capex_general', 'non_billable'];
-              return generalCategories.includes(item.category);
+              return generalCategories.includes(safeCategory);
           case 'monthly_master':
               return true;
           default:
@@ -255,7 +266,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
   // Subtotal Calculations for UI
   let subtotals = null;
   if (filterType === 'partner_master') {
-      const self = reportData.filter(i => i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
+      const self = reportData.filter(i => (i.paymentMode || '').includes('Self')).reduce((a, c) => a + c.amount, 0);
       const company = totalVal - self;
       subtotals = { 'Paid by Partner (Self)': self, 'Paid by Company': company };
   } else if (filterType === 'client_master') {
@@ -266,7 +277,6 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
 
   return (
       <div className="space-y-8">
-          {/* Generator Section */}
           <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200">
               <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
                   <FileText className="w-5 h-5 text-blue-600" /> Report Generator
@@ -306,7 +316,6 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                   )}
               </div>
 
-              {/* Total Display */}
               <div className="bg-gray-100 p-4 rounded-md mb-6 border">
                   <div className="flex justify-between items-center">
                       <div>
@@ -318,7 +327,6 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                           <span className="text-xl font-bold text-gray-800">{formatCurrency(totalVal)}</span>
                       </div>
                   </div>
-                  {/* UI Breakdown */}
                   {subtotals && (
                       <div className="mt-4 pt-3 border-t border-gray-200 grid grid-cols-2 gap-4">
                           {Object.entries(subtotals).map(([label, val]) => (
@@ -341,7 +349,6 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
               </div>
           </div>
           
-          {/* ALL DATA VIEW */}
           <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 overflow-hidden">
               <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2">
                 <Table className="w-5 h-5 text-gray-600" /> Preview: Report Data ({reportData.length} items)
@@ -353,8 +360,8 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                             <th className="px-4 py-3 font-medium text-gray-600">Date</th>
                             <th className="px-4 py-3 font-medium text-gray-600">Partner</th>
                             <th className="px-4 py-3 font-medium text-gray-600">Client</th>
-                            <th className="px-4 py-3 font-medium text-gray-600">Mode</th>
-                            <th className="px-4 py-3 font-medium text-gray-600">Category</th>
+                            <th className="px-4 py-3 font-medium text-gray-600">Head</th>
+                            <th className="px-4 py-3 font-medium text-gray-600">Description</th>
                             <th className="px-4 py-3 font-medium text-gray-600 text-right">Amount</th>
                         </tr>
                     </thead>
@@ -367,8 +374,8 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                                     <td className="px-4 py-3">{item.date}</td>
                                     <td className="px-4 py-3">{item.partner}</td>
                                     <td className="px-4 py-3">{item.client || '-'}</td>
-                                    <td className="px-4 py-3 text-xs">{item.paymentMode.includes('Self') ? 'Self' : 'Company'}</td>
-                                    <td className="px-4 py-3 text-xs uppercase text-gray-500">{item.category.replace('_', ' ')}</td>
+                                    <td className="px-4 py-3">{item.head}</td>
+                                    <td className="px-4 py-3 truncate max-w-xs">{item.description}</td>
                                     <td className="px-4 py-3 text-right font-mono font-medium">{formatCurrency(item.amount)}</td>
                                 </tr>
                             ))
@@ -578,7 +585,6 @@ export default function AvanziaExpenseTracker() {
     catch (err) { showNotification("Error deleting record", "error"); }
   };
 
-  // UPDATED: Robust PDF Generator (Isolates bad images)
   const generatePDF = async (data, title) => {
     if (!window.jspdf || !window.PDFLib) { showNotification("Libraries loading... please wait 5s and try again.", "error"); return; }
     setLoading(true);
@@ -590,11 +596,10 @@ export default function AvanziaExpenseTracker() {
         doc.setFontSize(18); doc.setTextColor(41, 50, 65); doc.text("Avanzia Global Private Limited", 14, 20);
         doc.setFontSize(12); doc.setTextColor(100); doc.text(title, 14, 28); doc.text(`Generated: ${new Date().toLocaleDateString()}`, 14, 34);
         
-        // --- Add Subtotals to PDF ---
         let startY = 40;
         if (title.includes("PARTNER_MASTER")) {
-            const self = data.filter(i => i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
-            const company = data.filter(i => !i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
+            const self = data.filter(i => (i.paymentMode || '').includes('Self')).reduce((a, c) => a + c.amount, 0);
+            const company = data.filter(i => !(i.paymentMode || '').includes('Self')).reduce((a, c) => a + c.amount, 0);
             doc.setFontSize(10); doc.setTextColor(50);
             doc.text(`Subtotal (Paid by Partner): ${formatCurrency(self)}`, 14, startY); startY += 5;
             doc.text(`Subtotal (Paid by Company): ${formatCurrency(company)}`, 14, startY); startY += 10;
@@ -606,14 +611,20 @@ export default function AvanziaExpenseTracker() {
             doc.text(`Subtotal (Non-Billable): ${formatCurrency(nonBillable)}`, 14, startY); startY += 10;
         }
 
-        const tableColumn = ["Date", "Partner", "Client", "Category", "Mode", "Desc", "Amount (INR)"];
+        const tableColumn = ["Date", "Partner", "Client", "Head", "Mode", "Description", "Amount (INR)"];
         const tableRows = [];
         let totalAmount = 0;
         data.forEach(item => {
             totalAmount += item.amount;
+            const safeMode = (item.paymentMode || '').includes('Self') ? 'Self' : 'Company';
             tableRows.push([
-                item.date, item.partner, item.client || '-', item.category.replace('_', ' '),
-                item.paymentMode.includes('Self') ? 'Self' : 'Company', item.description, formatCurrency(item.amount)
+                item.date, 
+                item.partner, 
+                item.client || '-', 
+                item.head || '',  
+                safeMode, 
+                item.description || '', 
+                formatCurrency(item.amount)
             ]);
         });
         tableRows.push(["", "", "", "", "", "TOTAL", formatCurrency(totalAmount)]);
@@ -623,16 +634,14 @@ export default function AvanziaExpenseTracker() {
         const tablePdfBytes = doc.output('arraybuffer');
         const finalPdf = await PDFDocument.load(tablePdfBytes);
         
-        // --- Image Embedding Loop (With individual error handling) ---
         for (const item of data) {
             if (!item.receiptImage) continue;
             try {
-                // Determine format based on prefix to prevent guessing games
                 const isPdf = item.receiptImage.startsWith('data:application/pdf');
                 const isPng = item.receiptImage.startsWith('data:image/png');
-                // Assume JPEG if image but not PNG (our compressor defaults to JPEG)
                 
-                const imageBytes = await fetch(item.receiptImage).then(res => res.arrayBuffer());
+                // UPDATED: Safe Base64 Conversion
+                const imageBytes = base64ToUint8Array(item.receiptImage);
 
                 if (isPdf) {
                     const receiptPdf = await PDFDocument.load(imageBytes);
@@ -643,7 +652,6 @@ export default function AvanziaExpenseTracker() {
                     if (isPng) {
                         imageToEmbed = await finalPdf.embedPng(imageBytes);
                     } else {
-                        // Default to JPEG (safest for camera photos processed by canvas)
                         imageToEmbed = await finalPdf.embedJpg(imageBytes);
                     }
 
@@ -658,7 +666,6 @@ export default function AvanziaExpenseTracker() {
                 }
             } catch (innerErr) {
                 console.warn(`Skipping corrupt/incompatible image for item: ${item.description}`, innerErr);
-                // We continue to the next item instead of crashing the report
                 continue;
             }
         }
@@ -673,24 +680,27 @@ export default function AvanziaExpenseTracker() {
     if (!window.XLSX) { showNotification("Excel Library loading... wait 5s.", "error"); return; }
     const XLSX = window.XLSX;
     
-    // Base data
     const rowData = data.map(item => ({
-        Date: item.date, Partner: item.partner, Client: item.client, Head: item.head, Category: CATEGORIES.find(c => c.id === item.category)?.label,
-        Description: item.description, Amount: item.amount, GST_Component: item.gstAmount || 0, Debited_Base: (item.category.includes('partner') ? (item.amount - (item.gstAmount || 0)) : item.amount),
-        Payment_Mode: item.paymentMode, Receipt_Type: item.receiptImage ? (item.receiptImage.startsWith('data:application/pdf') ? 'PDF' : 'Image') : "Missing", Missing_Reason: item.missingReceiptReason
+        Date: item.date, Partner: item.partner, Client: item.client, 
+        Head: item.head, 
+        Category: CATEGORIES.find(c => c.id === item.category)?.label,
+        Description: item.description, 
+        Amount: item.amount, GST_Component: item.gstAmount || 0, 
+        Payment_Mode: item.paymentMode, 
+        Receipt_Type: item.receiptImage ? (item.receiptImage.startsWith('data:application/pdf') ? 'PDF' : 'Image') : "Missing", 
+        Missing_Reason: item.missingReceiptReason
     }));
 
-    // Add Summary Rows for Excel
     if (filename.includes("Partner_Master")) {
-        const self = data.filter(i => i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
-        const company = data.filter(i => !i.paymentMode.includes('Self')).reduce((a, c) => a + c.amount, 0);
-        rowData.push({}); // Empty row
+        const self = data.filter(i => (i.paymentMode || '').includes('Self')).reduce((a, c) => a + c.amount, 0);
+        const company = data.filter(i => !(i.paymentMode || '').includes('Self')).reduce((a, c) => a + c.amount, 0);
+        rowData.push({});
         rowData.push({ Description: "SUBTOTAL (Paid by Self)", Amount: self });
         rowData.push({ Description: "SUBTOTAL (Paid by Company)", Amount: company });
     } else if (filename.includes("Client_Master")) {
         const billable = data.filter(i => i.category === 'billable').reduce((a, c) => a + c.amount, 0);
         const nonBillable = data.reduce((acc, curr) => acc + curr.amount, 0) - billable;
-        rowData.push({}); // Empty row
+        rowData.push({});
         rowData.push({ Description: "SUBTOTAL (Billable)", Amount: billable });
         rowData.push({ Description: "SUBTOTAL (Non-Billable)", Amount: nonBillable });
     }
