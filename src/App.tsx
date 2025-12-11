@@ -12,7 +12,7 @@ import {
   query, 
   onSnapshot, 
   deleteDoc, 
-  updateDoc, 
+  updateDoc,
   doc, 
 } from 'firebase/firestore';
 import { 
@@ -32,12 +32,13 @@ import {
   Table,
   XCircle,
   Pencil,
-  Calendar
+  Calendar,
+  User
 } from 'lucide-react';
 
 /**
  * AVANZIA GLOBAL - EXPENSE TRACKER
- * VERSION: Production v1.13 (Category Subtotals & Enhanced Reports)
+ * VERSION: Production v1.17 (Partner-wise Summary & PDF Fixes)
  */
 
 // --- 1. CONFIGURATION ---
@@ -105,36 +106,43 @@ const useTailwindLoader = () => {
 const useExternalScripts = () => {
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    const scripts = [
-      "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
-      "https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.29/jspdf.plugin.autotable.min.js",
-      "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
-      "https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"
-    ];
-    let loadedCount = 0;
-    const checkAllLoaded = () => { loadedCount++; if (loadedCount === scripts.length) setLoaded(true); };
-    scripts.forEach(src => {
-      if (!document.querySelector(`script[src="${src}"]`)) {
-        const script = document.createElement('script');
-        script.src = src;
-        script.async = true;
-        script.onload = checkAllLoaded;
-        document.body.appendChild(script);
-      } else { checkAllLoaded(); }
-    });
+    const loadScript = (src) => {
+        return new Promise((resolve, reject) => {
+            if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+            const script = document.createElement('script');
+            script.src = src;
+            script.onload = resolve;
+            script.onerror = reject;
+            document.body.appendChild(script);
+        });
+    };
+
+    const loadAll = async () => {
+        try {
+            await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
+            if (window.jspdf && window.jspdf.jsPDF) window.jsPDF = window.jspdf.jsPDF;
+            await Promise.all([
+                loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.29/jspdf.plugin.autotable.min.js"),
+                loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"),
+                loadScript("https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js")
+            ]);
+            setLoaded(true);
+        } catch (err) { console.error("Script loading failed", err); }
+    };
+    loadAll();
   }, []);
   return loaded;
 };
 
-// NEW HELPER: Robust Base64 to ArrayBuffer converter
 const base64ToUint8Array = (base64) => {
-  const raw = window.atob(base64.split(',')[1]);
-  const rawLength = raw.length;
-  const array = new Uint8Array(new ArrayBuffer(rawLength));
-  for (let i = 0; i < rawLength; i++) {
-    array[i] = raw.charCodeAt(i);
-  }
-  return array;
+  try {
+    if (!base64 || !base64.includes(',')) return null;
+    const raw = window.atob(base64.split(',')[1]);
+    const rawLength = raw.length;
+    const array = new Uint8Array(new ArrayBuffer(rawLength));
+    for (let i = 0; i < rawLength; i++) array[i] = raw.charCodeAt(i);
+    return array;
+  } catch (e) { return null; }
 };
 
 const compressImage = (file) => {
@@ -148,36 +156,19 @@ const compressImage = (file) => {
         const canvas = document.createElement('canvas');
         let width = img.width;
         let height = img.height;
-        
-        // Max 1600px for legibility
         const MAX_DIMENSION = 1600; 
-        if (width > height) {
-            if (width > MAX_DIMENSION) {
-                height *= MAX_DIMENSION / width;
-                width = MAX_DIMENSION;
-            }
-        } else {
-            if (height > MAX_DIMENSION) {
-                width *= MAX_DIMENSION / height;
-                height = MAX_DIMENSION;
-            }
-        }
-
-        canvas.width = width;
-        canvas.height = height;
+        if (width > height) { if (width > MAX_DIMENSION) { height *= MAX_DIMENSION / width; width = MAX_DIMENSION; } } 
+        else { if (height > MAX_DIMENSION) { width *= MAX_DIMENSION / height; height = MAX_DIMENSION; } }
+        canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext('2d');
-        ctx.fillStyle = "#FFFFFF"; 
-        ctx.fillRect(0, 0, width, height);
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
+        ctx.fillStyle = "#FFFFFF"; ctx.fillRect(0, 0, width, height);
+        ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, width, height);
         
         let quality = 0.8;
         let dataUrl = canvas.toDataURL('image/jpeg', quality);
-        // Limit to ~850KB
         while (dataUrl.length > 850000 && quality > 0.2) {
-            quality -= 0.1;
-            dataUrl = canvas.toDataURL('image/jpeg', quality);
+            quality -= 0.1; dataUrl = canvas.toDataURL('image/jpeg', quality);
         }
         resolve(dataUrl);
       };
@@ -226,11 +217,15 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
       { id: 'partner_master', label: 'Partner Master (All Expenses)' },
       { id: 'avanzia_general', label: 'Avanzia General Account (Consolidated)' },
       { id: 'monthly_master', label: 'Monthly Master Report (All)' },
+      { id: 'summary_view', label: 'Executive Summary (Partner-wise)' },
   ];
 
   // Filtering Logic
   const reportData = expenses.filter(item => {
       if (!item.date.startsWith(selectedMonth)) return false;
+
+      // Executive summary uses all data
+      if (filterType === 'summary_view') return true;
 
       const safeCategory = item.category || '';
       const safePaymentMode = item.paymentMode || '';
@@ -262,58 +257,32 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
 
   const totalVal = reportData.reduce((acc, curr) => acc + curr.amount, 0);
 
-  // --- SUBTOTAL CALCULATIONS ---
-  let subtotals = null;
-
-  const calculateSubtotals = (data) => {
-      const summary = {
-          'Client Billable': 0,
-          'Client Non-Billable': 0,
-          'Avanzia Gen. Account': 0,
-          'Partner Account': 0,
-          'Paid by Self': 0,
-          'Paid by Company': 0,
-          'Paid by Credit Card': 0
-      };
+  // --- Executive Summary Calculations (Partner by Partner) ---
+  const getPartnerWiseSummary = (data) => {
+      const summary = {};
+      PARTNERS.forEach(p => {
+          summary[p] = { total: 0, byCategory: {}, byMode: {} };
+      });
 
       data.forEach(item => {
-          const cat = item.category;
-          const mode = item.paymentMode;
+          const p = item.partner;
+          if (!summary[p]) summary[p] = { total: 0, byCategory: {}, byMode: {} };
+          
+          summary[p].total += item.amount;
+          
+          const cat = CATEGORIES.find(c => c.id === item.category)?.label || item.category;
+          summary[p].byCategory[cat] = (summary[p].byCategory[cat] || 0) + item.amount;
 
-          // Category breakdowns
-          if (cat === 'billable') summary['Client Billable'] += item.amount;
-          if (cat === 'non_billable') summary['Client Non-Billable'] += item.amount;
-          if (cat === 'company_general' || cat === 'capex_general') summary['Avanzia Gen. Account'] += item.amount;
-          if (cat === 'bd_partner' || cat === 'capex_partner') summary['Partner Account'] += item.amount;
-
-          // Payment Mode breakdowns
-          if (mode.includes('Self')) summary['Paid by Self'] += item.amount;
-          if (mode.includes('Bank Account')) summary['Paid by Company'] += item.amount;
-          if (mode.includes('Credit Card')) summary['Paid by Credit Card'] += item.amount;
+          let md = 'Other';
+          if ((item.paymentMode || '').includes('Self')) md = 'Paid by Self';
+          else if ((item.paymentMode || '').includes('Credit')) md = 'Credit Card';
+          else if ((item.paymentMode || '').includes('Bank')) md = 'Bank';
+          summary[p].byMode[md] = (summary[p].byMode[md] || 0) + item.amount;
       });
       return summary;
   };
 
-  const sums = calculateSubtotals(reportData);
-
-  if (filterType === 'partner_master' || filterType === 'monthly_master') {
-      subtotals = {
-          'Client Billable': sums['Client Billable'],
-          'Client Non-Billable': sums['Client Non-Billable'],
-          'Avanzia Gen. Account': sums['Avanzia Gen. Account'],
-          'Partner Account': sums['Partner Account'],
-          // Separator logic for display can be handled in PDF/Excel
-      };
-  } else if (filterType === 'client_master') {
-      subtotals = { 
-          'Billable': sums['Client Billable'], 
-          'Non-Billable': sums['Client Non-Billable'] 
-      };
-  } else if (filterType === 'partner') {
-      subtotals = {
-          'Total Reimbursable (Self)': sums['Paid by Self']
-      }
-  }
+  const partnerSummary = getPartnerWiseSummary(reportData);
 
   return (
       <div className="space-y-8">
@@ -333,106 +302,121 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                         onChange={(e) => setSelectedMonth(e.target.value)}
                       />
                   </div>
-
                   <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Report Type</label>
                       <select className="w-full border p-2 rounded-md bg-white" value={filterType} onChange={(e) => {setFilterType(e.target.value); setSelectedEntity('');}}>
                           {reportOptions.map(opt => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
                       </select>
                   </div>
-
-                  {(filterType.includes('client') || filterType.includes('partner')) && (
+                  {(filterType.includes('client') || filterType.includes('partner')) && !filterType.includes('summary') && (
                       <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
-                              Select {filterType.includes('client') ? 'Client' : 'Partner'}
-                          </label>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Select {filterType.includes('client') ? 'Client' : 'Partner'}</label>
                           <select className="w-full border p-2 rounded-md bg-white" value={selectedEntity} onChange={(e) => setSelectedEntity(e.target.value)}>
                               <option value="">-- Select --</option>
-                              {filterType.includes('client') 
-                                  ? clients.map(c => <option key={c} value={c}>{c}</option>)
-                                  : PARTNERS.map(p => <option key={p} value={p}>{p}</option>)
-                              }
+                              {filterType.includes('client') ? clients.map(c => <option key={c} value={c}>{c}</option>) : PARTNERS.map(p => <option key={p} value={p}>{p}</option>)}
                           </select>
                       </div>
                   )}
               </div>
 
-              {/* Total Display */}
-              <div className="bg-gray-100 p-4 rounded-md mb-6 border">
-                  <div className="flex justify-between items-center">
-                      <div>
-                          <span className="text-xs text-gray-500 uppercase font-bold block">Selected Report Scope</span>
-                          <span className="text-sm text-gray-700">{reportOptions.find(r => r.id === filterType)?.label} - {selectedMonth}</span>
-                      </div>
-                      <div className="text-right">
-                          <span className="text-xs text-gray-500 uppercase font-bold block">Grand Total</span>
-                          <span className="text-xl font-bold text-gray-800">{formatCurrency(totalVal)}</span>
-                      </div>
+              <div className="bg-gray-100 p-4 rounded-md mb-6 border flex justify-between items-center">
+                  <div>
+                      <span className="text-xs text-gray-500 uppercase font-bold block">Selected Report Scope</span>
+                      <span className="text-sm text-gray-700">{reportOptions.find(r => r.id === filterType)?.label} - {selectedMonth}</span>
                   </div>
-                  {/* UI Breakdown */}
-                  {subtotals && (
-                      <div className="mt-4 pt-3 border-t border-gray-200 grid grid-cols-2 md:grid-cols-4 gap-4">
-                          {Object.entries(subtotals).map(([label, val]) => (
-                              <div key={label} className="text-right">
-                                  <span className="text-xs text-gray-500 uppercase font-bold block">{label}</span>
-                                  <span className="text-sm font-semibold text-blue-700">{formatCurrency(val)}</span>
-                              </div>
-                          ))}
-                      </div>
-                  )}
+                  <div className="text-right">
+                      <span className="text-xs text-gray-500 uppercase font-bold block">Grand Total</span>
+                      <span className="text-xl font-bold text-gray-800">{formatCurrency(totalVal)}</span>
+                  </div>
               </div>
 
               <div className="flex gap-4">
-                  <Button variant="primary" disabled={reportData.length === 0} onClick={() => generatePDF(reportData, `${filterType.toUpperCase()} Report - ${selectedMonth}`)}>
+                  <Button variant="primary" disabled={reportData.length === 0} onClick={() => generatePDF(reportData, filterType === 'summary_view' ? `Executive Summary - ${selectedMonth}` : `${filterType.toUpperCase()} Report - ${selectedMonth}`)}>
                       <Download className="w-4 h-4" /> Download PDF
                   </Button>
-                  <Button variant="secondary" disabled={reportData.length === 0} onClick={() => generateExcel(reportData, `Report_${filterType}_${selectedMonth}`)}>
+                  <Button variant="secondary" disabled={reportData.length === 0} onClick={() => generateExcel(reportData, `Report_${filterType}_${selectedMonth}`, filterType === 'summary_view')}>
                       <FileText className="w-4 h-4" /> Export Excel
                   </Button>
               </div>
           </div>
           
-          {/* ALL DATA VIEW */}
-          <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 overflow-hidden">
-              <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2">
-                <Table className="w-5 h-5 text-gray-600" /> Preview: Report Data ({reportData.length} items)
-              </h3>
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm text-left">
-                    <thead className="bg-gray-50 border-b">
-                        <tr>
-                            <th className="px-4 py-3 font-medium text-gray-600">Date</th>
-                            <th className="px-4 py-3 font-medium text-gray-600">Partner</th>
-                            <th className="px-4 py-3 font-medium text-gray-600">Client</th>
-                            <th className="px-4 py-3 font-medium text-gray-600">Head</th>
-                            <th className="px-4 py-3 font-medium text-gray-600">Mode</th>
-                            <th className="px-4 py-3 font-medium text-gray-600">Category</th>
-                            <th className="px-4 py-3 font-medium text-gray-600 text-right">Amount</th>
-                        </tr>
-                    </thead>
-                    <tbody className="divide-y">
-                        {reportData.length === 0 ? (
-                            <tr><td colSpan="7" className="p-8 text-center text-gray-500">No records match current filters.</td></tr>
-                        ) : (
-                            reportData.map(item => (
-                                <tr key={item.id} className="hover:bg-gray-50 transition-colors">
-                                    <td className="px-4 py-3">{item.date}</td>
-                                    <td className="px-4 py-3">{item.partner}</td>
-                                    <td className="px-4 py-3">{item.client || '-'}</td>
-                                    <td className="px-4 py-3">{item.head}</td>
-                                    <td className="px-4 py-3 text-xs">
-                                        {item.paymentMode.includes('Self') ? 'Self' : 
-                                         item.paymentMode.includes('Credit') ? 'Credit Card' : 'Bank'}
-                                    </td>
-                                    <td className="px-4 py-3 text-xs uppercase text-gray-500">{item.category.replace('_', ' ')}</td>
-                                    <td className="px-4 py-3 text-right font-mono font-medium">{formatCurrency(item.amount)}</td>
-                                </tr>
-                            ))
-                        )}
-                    </tbody>
-                </table>
+          {/* DYNAMIC VIEW */}
+          {filterType === 'summary_view' ? (
+              <div className="grid grid-cols-1 gap-6">
+                  {Object.entries(partnerSummary).map(([partnerName, data]) => {
+                      if (data.total === 0) return null;
+                      return (
+                          <div key={partnerName} className="bg-white p-5 rounded-xl shadow-md border border-gray-200">
+                              <div className="flex justify-between border-b pb-2 mb-3">
+                                  <h3 className="font-bold text-gray-800 text-lg flex items-center gap-2">
+                                      <User className="w-5 h-5 text-blue-500" /> {partnerName}
+                                  </h3>
+                                  <span className="font-bold text-blue-700">{formatCurrency(data.total)}</span>
+                              </div>
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                  <div>
+                                      <h4 className="text-xs font-bold text-gray-500 uppercase mb-2">By Category</h4>
+                                      <table className="w-full text-sm">
+                                          <tbody>
+                                              {Object.entries(data.byCategory).map(([k, v]) => (
+                                                  <tr key={k} className="border-b last:border-0 border-gray-100"><td className="py-1 text-gray-600">{k}</td><td className="py-1 text-right font-medium">{formatCurrency(v)}</td></tr>
+                                              ))}
+                                          </tbody>
+                                      </table>
+                                  </div>
+                                  <div>
+                                      <h4 className="text-xs font-bold text-gray-500 uppercase mb-2">By Payment Mode</h4>
+                                      <table className="w-full text-sm">
+                                          <tbody>
+                                              {Object.entries(data.byMode).map(([k, v]) => (
+                                                  <tr key={k} className="border-b last:border-0 border-gray-100"><td className="py-1 text-gray-600">{k}</td><td className="py-1 text-right font-medium">{formatCurrency(v)}</td></tr>
+                                              ))}
+                                          </tbody>
+                                      </table>
+                                  </div>
+                              </div>
+                          </div>
+                      );
+                  })}
+                  {totalVal === 0 && <div className="text-center p-8 text-gray-500">No data found for this month.</div>}
               </div>
-          </div>
+          ) : (
+              <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 overflow-hidden">
+                  <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2"><Table className="w-5 h-5 text-gray-600" /> Expense List</h3>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-sm text-left">
+                        <thead className="bg-gray-50 border-b">
+                            <tr>
+                                <th className="px-4 py-3 font-medium text-gray-600">Date</th>
+                                <th className="px-4 py-3 font-medium text-gray-600">Partner</th>
+                                <th className="px-4 py-3 font-medium text-gray-600">Client</th>
+                                <th className="px-4 py-3 font-medium text-gray-600">Head</th>
+                                <th className="px-4 py-3 font-medium text-gray-600">Mode</th>
+                                <th className="px-4 py-3 font-medium text-gray-600">Category</th>
+                                <th className="px-4 py-3 font-medium text-gray-600 text-right">Amount</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                            {reportData.length === 0 ? (
+                                <tr><td colSpan="7" className="p-8 text-center text-gray-500">No records match current filters.</td></tr>
+                            ) : (
+                                reportData.map(item => (
+                                    <tr key={item.id} className="hover:bg-gray-50 transition-colors">
+                                        <td className="px-4 py-3">{item.date}</td>
+                                        <td className="px-4 py-3">{item.partner}</td>
+                                        <td className="px-4 py-3">{item.client || '-'}</td>
+                                        <td className="px-4 py-3">{item.head}</td>
+                                        <td className="px-4 py-3 text-xs">{item.paymentMode.includes('Self') ? 'Self' : item.paymentMode.includes('Credit') ? 'Credit Card' : 'Bank'}</td>
+                                        <td className="px-4 py-3 text-xs uppercase text-gray-500">{item.category.replace('_', ' ')}</td>
+                                        <td className="px-4 py-3 text-right font-mono font-medium">{formatCurrency(item.amount)}</td>
+                                    </tr>
+                                ))
+                            )}
+                        </tbody>
+                    </table>
+                  </div>
+              </div>
+          )}
       </div>
   );
 };
@@ -441,42 +425,21 @@ const AdminView = ({ clients, expenses, handleAddClient, handleDelete, generateE
   const [newClient, setNewClient] = useState("");
   return (
       <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 max-w-2xl mx-auto">
-          <h2 className="text-xl font-bold text-gray-800 mb-6 flex items-center gap-2">
-              <Settings className="w-5 h-5 text-gray-600" /> System Configuration
-          </h2>
+          <h2 className="text-xl font-bold text-gray-800 mb-6 flex items-center gap-2"><Settings className="w-5 h-5 text-gray-600" /> System Configuration</h2>
           <div className="mb-8">
               <h3 className="font-semibold text-gray-700 mb-3">Client Management</h3>
-              <div className="flex gap-2 mb-4">
-                  <input type="text" placeholder="New Client Name" className="flex-1 border p-2 rounded-md bg-white" value={newClient} onChange={(e) => setNewClient(e.target.value)} />
-                  <Button onClick={() => {handleAddClient(newClient); setNewClient("");}}>Add Client</Button>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                  {clients.map(c => <span key={c} className="bg-blue-50 text-blue-700 px-3 py-1 rounded-full text-sm border border-blue-100">{c}</span>)}
-              </div>
+              <div className="flex gap-2 mb-4"><input type="text" placeholder="New Client Name" className="flex-1 border p-2 rounded-md bg-white" value={newClient} onChange={(e) => setNewClient(e.target.value)} /><Button onClick={() => {handleAddClient(newClient); setNewClient("");}}>Add Client</Button></div>
+              <div className="flex flex-wrap gap-2">{clients.map(c => <span key={c} className="bg-blue-50 text-blue-700 px-3 py-1 rounded-full text-sm border border-blue-100">{c}</span>)}</div>
           </div>
           <div>
               <h3 className="font-semibold text-gray-700 mb-3">All Expense Records (Master List)</h3>
               <div className="border rounded-md overflow-hidden max-h-96 overflow-y-auto">
                   <table className="min-w-full text-xs">
-                      <thead className="bg-gray-100 sticky top-0">
-                          <tr><th className="p-2 text-left">Date</th><th className="p-2 text-left">Client</th><th className="p-2 text-right">Amount</th><th className="p-2 text-center">Actions</th></tr>
-                      </thead>
-                      <tbody className="divide-y">
-                          {expenses.map(exp => (
-                              <tr key={exp.id} className="hover:bg-gray-50">
-                                  <td className="p-2">{exp.date}</td><td className="p-2">{exp.client || 'General'}</td><td className="p-2 text-right">{formatCurrency(exp.amount)}</td>
-                                  <td className="p-2 text-center flex justify-center gap-2">
-                                      <button onClick={() => onEdit(exp)} className="text-blue-500 hover:text-blue-700"><Pencil className="w-4 h-4" /></button>
-                                      <button onClick={() => handleDelete(exp.id)} className="text-red-500 hover:text-red-700"><Trash2 className="w-4 h-4" /></button>
-                                  </td>
-                              </tr>
-                          ))}
-                      </tbody>
+                      <thead className="bg-gray-100 sticky top-0"><tr><th className="p-2 text-left">Date</th><th className="p-2 text-left">Client</th><th className="p-2 text-right">Amount</th><th className="p-2 text-center">Actions</th></tr></thead>
+                      <tbody className="divide-y">{expenses.map(exp => (<tr key={exp.id} className="hover:bg-gray-50"><td className="p-2">{exp.date}</td><td className="p-2">{exp.client || 'General'}</td><td className="p-2 text-right">{formatCurrency(exp.amount)}</td><td className="p-2 text-center flex justify-center gap-2"><button onClick={() => onEdit(exp)} className="text-blue-500 hover:text-blue-700"><Pencil className="w-4 h-4" /></button><button onClick={() => handleDelete(exp.id)} className="text-red-500 hover:text-red-700"><Trash2 className="w-4 h-4" /></button></td></tr>))}</tbody>
                   </table>
               </div>
-              <div className="mt-4">
-                  <Button variant="outline" className="w-full" onClick={() => generateExcel(expenses, "Master_Export")}><Download className="w-4 h-4" /> Download Complete Master Data (Excel)</Button>
-              </div>
+              <div className="mt-4"><Button variant="outline" className="w-full" onClick={() => generateExcel(expenses, "Master_Export")}><Download className="w-4 h-4" /> Download Complete Master Data (Excel)</Button></div>
           </div>
       </div>
   );
@@ -506,15 +469,10 @@ export default function AvanziaExpenseTracker() {
   useEffect(() => {
     if (!auth) return;
     const initAuth = async () => { 
-      try { 
-        await signInAnonymously(auth); 
-      } catch (e) { 
+      try { await signInAnonymously(auth); } catch (e) { 
         console.error("Auth Error", e);
-        if (e.code === 'auth/admin-restricted-operation' || e.code === 'auth/operation-not-allowed') {
-          setAuthError("ACTION REQUIRED: Enable 'Anonymous' sign-in in Firebase Console.");
-        } else {
-          setAuthError(`Authentication Error: ${e.message}`);
-        }
+        if (e.code === 'auth/admin-restricted-operation' || e.code === 'auth/operation-not-allowed') setAuthError("ACTION REQUIRED: Enable 'Anonymous' sign-in in Firebase Console.");
+        else setAuthError(`Authentication Error: ${e.message}`);
       }
     };
     initAuth();
@@ -539,9 +497,7 @@ export default function AvanziaExpenseTracker() {
         }
       });
       return () => { unsubExpenses(); unsubClients(); };
-    } catch(e) {
-      console.error("Firestore Error", e);
-    }
+    } catch(e) { console.error("Firestore Error", e); }
   }, [user]);
 
   const showNotification = (message, type = 'success') => {
@@ -551,20 +507,11 @@ export default function AvanziaExpenseTracker() {
 
   const handleEdit = (expense) => {
       setFormData({
-          partner: expense.partner,
-          client: expense.client || "",
-          head: expense.head,
-          date: expense.date,
-          amount: expense.amount,
-          gstAmount: expense.gstAmount || "",
-          description: expense.description,
-          category: expense.category,
-          paymentMode: expense.paymentMode,
-          receiptImage: expense.receiptImage,
-          missingReceiptReason: expense.missingReceiptReason || ""
+          partner: expense.partner, client: expense.client || "", head: expense.head, date: expense.date, amount: expense.amount,
+          gstAmount: expense.gstAmount || "", description: expense.description, category: expense.category, paymentMode: expense.paymentMode,
+          receiptImage: expense.receiptImage, missingReceiptReason: expense.missingReceiptReason || ""
       });
-      setEditingId(expense.id);
-      setActiveTab('entry');
+      setEditingId(expense.id); setActiveTab('entry');
       showNotification("Expense loaded for editing. Click Update when done.", "success");
   };
 
@@ -572,7 +519,6 @@ export default function AvanziaExpenseTracker() {
     const file = e.target.files[0];
     if (!file) return;
     if (file.size > 20 * 1024 * 1024) { showNotification("File too large (>20MB).", "error"); return; }
-
     if (file.type === 'application/pdf') {
         if (file.size > 900 * 1024) { showNotification("PDF too large. Max 900KB.", "error"); return; }
         try { const base64 = await readFileAsBase64(file); setFormData(prev => ({ ...prev, receiptImage: base64, missingReceiptReason: "" })); } 
@@ -581,10 +527,7 @@ export default function AvanziaExpenseTracker() {
         try { 
             showNotification("Compressing image...", "success");
             const compressedBase64 = await compressImage(file); 
-            if (compressedBase64.length > 1040000) {
-                showNotification("Image too large even after compression.", "error");
-                return;
-            }
+            if (compressedBase64.length > 1040000) { showNotification("Image too large even after compression.", "error"); return; }
             setFormData(prev => ({ ...prev, receiptImage: compressedBase64, missingReceiptReason: "" })); 
         } 
         catch (err) { showNotification("Error processing image", "error"); }
@@ -601,21 +544,12 @@ export default function AvanziaExpenseTracker() {
     e.preventDefault();
     if (!user) { showNotification("Authentication missing. Refresh page.", "error"); return; }
     if (!formData.receiptImage && !formData.missingReceiptReason) { showNotification("Please attach a bill OR provide a reason.", "error"); return; }
-    
     setLoading(true);
     try {
-      const payload = { 
-          ...formData, 
-          amount: parseFloat(formData.amount) || 0, 
-          gstAmount: formData.gstAmount ? parseFloat(formData.gstAmount) : 0, 
-          createdAt: new Date().toISOString(), 
-          createdBy: user.uid 
-      };
-      
+      const payload = { ...formData, amount: parseFloat(formData.amount) || 0, gstAmount: formData.gstAmount ? parseFloat(formData.gstAmount) : 0, createdAt: new Date().toISOString(), createdBy: user.uid };
       if (editingId) {
           await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'avanzia_expenses', editingId), payload);
-          showNotification("Expense updated successfully!");
-          setEditingId(null);
+          showNotification("Expense updated successfully!"); setEditingId(null);
       } else {
           await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'avanzia_expenses'), payload);
           showNotification("Expense saved successfully!"); 
@@ -645,80 +579,104 @@ export default function AvanziaExpenseTracker() {
         doc.setFontSize(18); doc.setTextColor(41, 50, 65); doc.text("Avanzia Global Private Limited", 14, 20);
         doc.setFontSize(12); doc.setTextColor(100); doc.text(title, 14, 28); doc.text(`Generated: ${new Date().toLocaleDateString()}`, 14, 34);
         
-        // --- Add Subtotals to PDF ---
         let startY = 40;
-        
-        // Helper to sum by category and payment mode
+
+        // EXECUTIVE SUMMARY HANDLING (PARTNER BY PARTNER)
+        if (title.includes("Executive Summary")) {
+             // Calculate summary manually here so we have access to it
+             const partnerSummary = {};
+             PARTNERS.forEach(p => { partnerSummary[p] = { total: 0, byCategory: {}, byMode: {} }; });
+             data.forEach(item => {
+                 const p = item.partner;
+                 if (!partnerSummary[p]) partnerSummary[p] = { total: 0, byCategory: {}, byMode: {} };
+                 partnerSummary[p].total += item.amount;
+                 const cat = CATEGORIES.find(c => c.id === item.category)?.label || item.category;
+                 partnerSummary[p].byCategory[cat] = (partnerSummary[p].byCategory[cat] || 0) + item.amount;
+                 let md = 'Other';
+                 if ((item.paymentMode || '').includes('Self')) md = 'Paid by Self';
+                 else if ((item.paymentMode || '').includes('Credit')) md = 'Credit Card';
+                 else if ((item.paymentMode || '').includes('Bank')) md = 'Bank';
+                 partnerSummary[p].byMode[md] = (partnerSummary[p].byMode[md] || 0) + item.amount;
+             });
+
+             Object.entries(partnerSummary).forEach(([partner, summary]) => {
+                 if (summary.total === 0) return;
+                 
+                 // Check page break
+                 if (startY > 250) { doc.addPage(); startY = 20; }
+                 
+                 doc.setFontSize(14); doc.setTextColor(0);
+                 doc.text(`${partner} - Total: ${formatCurrency(summary.total)}`, 14, startY);
+                 startY += 8;
+
+                 const rows = [];
+                 Object.entries(summary.byCategory).forEach(([cat, amt]) => rows.push([cat, formatCurrency(amt)]));
+                 rows.push(['---', '---']);
+                 Object.entries(summary.byMode).forEach(([mode, amt]) => rows.push([mode, formatCurrency(amt)]));
+
+                 doc.autoTable({
+                     head: [['Category / Mode', 'Amount']],
+                     body: rows,
+                     startY: startY,
+                     theme: 'grid',
+                     styles: { fontSize: 10 },
+                     headStyles: { fillColor: [100, 100, 100] }
+                 });
+                 startY = doc.lastAutoTable.finalY + 15;
+             });
+
+             doc.save(`${title.replace(/\s+/g, '_')}.pdf`);
+             setLoading(false);
+             return;
+        }
+
+        // STANDARD REPORTS (Details + Subtotals)
         const sumBy = (fn) => data.filter(fn).reduce((a, c) => a + c.amount, 0);
 
         if (title.includes("PARTNER_MASTER") || title.includes("MONTHLY_MASTER")) {
-            doc.setFontSize(10);
-            doc.setTextColor(50);
-            
-            // Category Breakdown
-            const billable = sumBy(i => i.category === 'billable');
-            const nonBillable = sumBy(i => i.category === 'non_billable');
-            const genAccount = sumBy(i => i.category.includes('general'));
-            const partnerAccount = sumBy(i => i.category.includes('partner') && !i.category.includes('general'));
+            doc.setFontSize(10); doc.setTextColor(50);
+            const billable = sumBy(i => (i.category || '') === 'billable');
+            const nonBillable = sumBy(i => (i.category || '') === 'non_billable');
+            const genAccount = sumBy(i => (i.category || '').includes('general'));
+            const partnerAccount = sumBy(i => (i.category || '').includes('partner') && !(i.category || '').includes('general'));
             
             doc.text("Category Breakdown:", 14, startY);
             doc.text(`- Billable: ${formatCurrency(billable)}`, 20, startY + 5);
             doc.text(`- Non-Billable: ${formatCurrency(nonBillable)}`, 20, startY + 10);
             doc.text(`- Avanzia Gen: ${formatCurrency(genAccount)}`, 80, startY + 5);
             doc.text(`- Partner Account: ${formatCurrency(partnerAccount)}`, 80, startY + 10);
-            
             startY += 20;
-
-            // Payment Mode Breakdown
             const self = sumBy(i => (i.paymentMode || '').includes('Self'));
             const credit = sumBy(i => (i.paymentMode || '').includes('Credit'));
             const bank = sumBy(i => (i.paymentMode || '').includes('Bank'));
-            
             doc.text("Payment Mode Breakdown:", 14, startY);
             doc.text(`- Self: ${formatCurrency(self)}`, 20, startY + 5);
             doc.text(`- Credit Card: ${formatCurrency(credit)}`, 80, startY + 5);
             doc.text(`- Bank Debit: ${formatCurrency(bank)}`, 140, startY + 5);
-            
             startY += 15;
         }
 
-        const tableColumn = ["Date", "Partner", "Client", "Head", "Category", "Mode", "Desc", "Amount"];
+        const tableColumn = ["Date", "Partner", "Client", "Head", "Mode", "Desc", "Amount"];
         const tableRows = [];
         let totalAmount = 0;
         data.forEach(item => {
             totalAmount += item.amount;
-            
-            // Format Payment Mode Short
             let modeShort = 'Other';
             if ((item.paymentMode || '').includes('Self')) modeShort = 'Self';
             else if ((item.paymentMode || '').includes('Credit')) modeShort = 'Credit';
             else if ((item.paymentMode || '').includes('Bank')) modeShort = 'Bank';
-
-            // Format Category Short
-            const catShort = item.category.replace('_', ' ').replace('Account', '').replace('Related', '');
-
+            
             tableRows.push([
-                item.date, 
-                item.partner.split(' ')[0], // First name only to save space
-                item.client || '-', 
-                item.head.substring(0, 15) + (item.head.length > 15 ? '...' : ''), // Truncate head
-                catShort,
-                modeShort,
-                (item.description || '').substring(0, 20), 
+                item.date, item.partner, item.client || '-', 
+                (item.head || '').substring(0, 15), modeShort, (item.description || '').substring(0, 20), 
                 formatCurrency(item.amount)
             ]);
         });
-        tableRows.push(["", "", "", "", "", "", "TOTAL", formatCurrency(totalAmount)]);
+        tableRows.push(["", "", "", "", "", "TOTAL", formatCurrency(totalAmount)]);
         
-        doc.autoTable({ 
-            head: [tableColumn], 
-            body: tableRows, 
-            startY: startY, 
-            theme: 'grid', 
-            styles: { fontSize: 8 }, // Smaller font for more columns
-            headStyles: { fillColor: [66, 133, 244] } 
-        });
+        doc.autoTable({ head: [tableColumn], body: tableRows, startY: startY, theme: 'grid', styles: { fontSize: 8 }, headStyles: { fillColor: [66, 133, 244] } });
         
+        // Image Processing Logic (Same as before)
         const tablePdfBytes = doc.output('arraybuffer');
         const finalPdf = await PDFDocument.load(tablePdfBytes);
         
@@ -727,8 +685,8 @@ export default function AvanziaExpenseTracker() {
             try {
                 const isPdf = item.receiptImage.startsWith('data:application/pdf');
                 const isPng = item.receiptImage.startsWith('data:image/png');
-                
                 const imageBytes = base64ToUint8Array(item.receiptImage);
+                if (!imageBytes) continue;
 
                 if (isPdf) {
                     const receiptPdf = await PDFDocument.load(imageBytes);
@@ -736,59 +694,77 @@ export default function AvanziaExpenseTracker() {
                     copiedPages.forEach((page) => finalPdf.addPage(page));
                 } else {
                     let imageToEmbed;
-                    if (isPng) {
-                        imageToEmbed = await finalPdf.embedPng(imageBytes);
-                    } else {
-                        imageToEmbed = await finalPdf.embedJpg(imageBytes);
-                    }
+                    if (isPng) imageToEmbed = await finalPdf.embedPng(imageBytes);
+                    else imageToEmbed = await finalPdf.embedJpg(imageBytes);
 
                     const page = finalPdf.addPage();
                     page.drawText(`Receipt: ${item.description} - ${formatCurrency(item.amount)}`, { x: 50, y: page.getHeight() - 50, size: 12 });
-                    
                     const imgDims = imageToEmbed.scale(1);
                     const pageWidth = page.getWidth(); const pageHeight = page.getHeight(); const margin = 50;
                     let w = imgDims.width; let h = imgDims.height; const maxWidth = pageWidth - (margin * 2); const maxHeight = pageHeight - (margin * 2) - 60;
                     const scale = Math.min(maxWidth / w, maxHeight / h, 1);
                     page.drawImage(imageToEmbed, { x: margin, y: pageHeight - margin - 60 - (h * scale), width: w * scale, height: h * scale });
                 }
-            } catch (innerErr) {
-                console.warn(`Skipping corrupt/incompatible image for item: ${item.description}`, innerErr);
-                continue;
-            }
+            } catch (innerErr) { console.warn(`Skipping image`, innerErr); continue; }
         }
         const pdfBytes = await finalPdf.save();
         const blob = new Blob([pdfBytes], { type: "application/pdf" });
         const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `${title.replace(/\s+/g, '_')}.pdf`; link.click();
         showNotification("PDF Report Generated!");
-    } catch (err) { console.error(err); showNotification("Error generating PDF. Check console.", "error"); } finally { setLoading(false); }
+    } catch (err) { console.error(err); showNotification(`Error: ${err.message}`, "error"); } finally { setLoading(false); }
   };
 
-  const generateExcel = (data, filename) => {
+  const generateExcel = (data, filename, isSummary = false) => {
     if (!window.XLSX) { showNotification("Excel Library loading... wait 5s.", "error"); return; }
     const XLSX = window.XLSX;
     
+    // Logic for Summary View Excel
+    if (isSummary) {
+         const partnerSummary = {};
+         PARTNERS.forEach(p => { partnerSummary[p] = { total: 0, byCategory: {}, byMode: {} }; });
+         data.forEach(item => {
+             const p = item.partner;
+             if (!partnerSummary[p]) partnerSummary[p] = { total: 0, byCategory: {}, byMode: {} };
+             partnerSummary[p].total += item.amount;
+             const cat = CATEGORIES.find(c => c.id === item.category)?.label || item.category;
+             partnerSummary[p].byCategory[cat] = (partnerSummary[p].byCategory[cat] || 0) + item.amount;
+             let md = 'Other';
+             if ((item.paymentMode || '').includes('Self')) md = 'Paid by Self';
+             else if ((item.paymentMode || '').includes('Credit')) md = 'Credit Card';
+             else if ((item.paymentMode || '').includes('Bank')) md = 'Bank';
+             partnerSummary[p].byMode[md] = (partnerSummary[p].byMode[md] || 0) + item.amount;
+         });
+
+         const rows = [];
+         Object.entries(partnerSummary).forEach(([partner, summary]) => {
+             if (summary.total === 0) return;
+             rows.push({ Partner: partner, Category: 'TOTAL', Amount: summary.total });
+             Object.entries(summary.byCategory).forEach(([k, v]) => rows.push({ Partner: '', Category: k, Amount: v }));
+             Object.entries(summary.byMode).forEach(([k, v]) => rows.push({ Partner: '', Category: `Mode: ${k}`, Amount: v }));
+             rows.push({});
+         });
+
+         const ws = XLSX.utils.json_to_sheet(rows);
+         const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Summary"); XLSX.writeFile(wb, `${filename}.xlsx`);
+         return;
+    }
+
     const rowData = data.map(item => ({
-        Date: item.date, Partner: item.partner, Client: item.client, 
-        Head: item.head, 
-        Category: CATEGORIES.find(c => c.id === item.category)?.label,
-        Description: item.description, 
-        Amount: item.amount, GST_Component: item.gstAmount || 0, 
-        Payment_Mode: item.paymentMode, 
-        Receipt_Type: item.receiptImage ? (item.receiptImage.startsWith('data:application/pdf') ? 'PDF' : 'Image') : "Missing", 
+        Date: item.date, Partner: item.partner, Client: item.client, Head: item.head, 
+        Category: CATEGORIES.find(c => c.id === item.category)?.label || item.category,
+        Description: item.description, Amount: item.amount, GST_Component: item.gstAmount || 0, 
+        Payment_Mode: item.paymentMode, Receipt_Type: item.receiptImage ? (item.receiptImage.startsWith('data:application/pdf') ? 'PDF' : 'Image') : "Missing", 
         Missing_Reason: item.missingReceiptReason
     }));
 
-    if (filename.includes("Partner_Master") || filename.includes("Monthly_Master")) {
-        // Calculate Subtotals
+    if (filename.includes("Partner_Master") || filename.includes("Monthly_Master") || filename.includes("Client_Master")) {
         const sumBy = (fn) => data.filter(fn).reduce((a, c) => a + c.amount, 0);
-
         rowData.push({}); 
         rowData.push({ Description: "--- CATEGORY BREAKDOWN ---" });
-        rowData.push({ Description: "Client Billable", Amount: sumBy(i => i.category === 'billable') });
-        rowData.push({ Description: "Client Non-Billable", Amount: sumBy(i => i.category === 'non_billable') });
-        rowData.push({ Description: "Avanzia Gen. Account", Amount: sumBy(i => i.category.includes('general')) });
-        rowData.push({ Description: "Partner Account", Amount: sumBy(i => i.category.includes('partner') && !i.category.includes('general')) });
-
+        rowData.push({ Description: "Client Billable", Amount: sumBy(i => (i.category || '') === 'billable') });
+        rowData.push({ Description: "Client Non-Billable", Amount: sumBy(i => (i.category || '') === 'non_billable') });
+        rowData.push({ Description: "Avanzia Gen. Account", Amount: sumBy(i => (i.category || '').includes('general')) });
+        rowData.push({ Description: "Partner Account", Amount: sumBy(i => (i.category || '').includes('partner') && !(i.category || '').includes('general')) });
         rowData.push({}); 
         rowData.push({ Description: "--- PAYMENT MODE BREAKDOWN ---" });
         rowData.push({ Description: "Paid by Self", Amount: sumBy(i => (i.paymentMode || '').includes('Self')) });
@@ -800,6 +776,8 @@ export default function AvanziaExpenseTracker() {
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Expenses"); XLSX.writeFile(wb, `${filename}.xlsx`);
   };
 
+  // ... (Rest of component remains the same)
+
   const renderEntryForm = () => (
     <div className="bg-white rounded-xl shadow-md border border-gray-100 p-6 max-w-4xl mx-auto">
       <div className="flex justify-between items-center mb-6">
@@ -807,11 +785,8 @@ export default function AvanziaExpenseTracker() {
               {editingId ? <Pencil className="w-6 h-6 text-orange-600" /> : <Plus className="w-6 h-6 text-blue-600" />} 
               {editingId ? "Edit Expense Entry" : "New Expense Entry"}
           </h2>
-          {editingId && (
-              <button onClick={() => {setEditingId(null); setFormData(initialFormState);}} className="text-sm text-red-500 underline">Cancel Edit</button>
-          )}
+          {editingId && (<button onClick={() => {setEditingId(null); setFormData(initialFormState);}} className="text-sm text-red-500 underline">Cancel Edit</button>)}
       </div>
-      
       <form onSubmit={handleSubmit} className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div><label className="block text-sm font-medium text-gray-700 mb-1">Partner Name</label><select required className="w-full border border-gray-300 p-2 rounded-lg bg-white" value={formData.partner} onChange={e => setFormData({...formData, partner: e.target.value})}>{PARTNERS.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
@@ -833,44 +808,17 @@ export default function AvanziaExpenseTracker() {
             </div>
           </div>
         </div>
-        <div className="pt-4 flex justify-end">
-            <Button onClick={handleSubmit} disabled={loading} className={`w-full md:w-auto ${editingId ? 'bg-orange-600 hover:bg-orange-700' : ''}`}>
-                {loading ? "Saving..." : (editingId ? "Update Expense Record" : "Save Expense Record")}
-            </Button>
-        </div>
+        <div className="pt-4 flex justify-end"><Button onClick={handleSubmit} disabled={loading} className={`w-full md:w-auto ${editingId ? 'bg-orange-600 hover:bg-orange-700' : ''}`}>{loading ? "Saving..." : (editingId ? "Update Expense Record" : "Save Expense Record")}</Button></div>
       </form>
     </div>
   );
 
-  // --- WAIT FOR STYLES ---
-  if (!stylesLoaded) {
-      return (
-          <div style={{ display: 'flex', height: '100vh', justifyContent: 'center', alignItems: 'center', fontFamily: 'sans-serif' }}>
-              <div style={{ textAlign: 'center' }}>
-                  <div style={{ width: '40px', height: '40px', border: '4px solid #f3f3f3', borderTop: '4px solid #3498db', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
-                  <p style={{ marginTop: '20px', color: '#666' }}>Loading Application...</p>
-                  <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
-              </div>
-          </div>
-      );
-  }
+  if (!stylesLoaded) return <div className="flex h-screen justify-center items-center font-sans"><div className="text-center"><Loader2 className="w-10 h-10 animate-spin text-blue-600 mx-auto"/><p className="mt-4 text-gray-600">Loading Application...</p></div></div>;
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-gray-900 pb-20">
-      {/* Auth Error Banner */}
-      {authError && (
-        <div className="bg-red-600 text-white p-4 text-center font-bold sticky top-0 z-50 shadow-lg flex items-center justify-center gap-2 animate-pulse">
-           <AlertTriangle className="w-6 h-6" />
-           {authError}
-        </div>
-      )}
-      
-      {notification && (
-        <div className={`fixed top-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg text-white font-medium animate-bounce flex items-center gap-2 ${notification.type === 'error' ? 'bg-red-500' : 'bg-green-600'}`}>
-            {notification.type === 'error' ? <XCircle className="w-5 h-5"/> : <Check className="w-5 h-5"/>}
-            {notification.message}
-        </div>
-      )}
+      {authError && <div className="bg-red-600 text-white p-4 text-center font-bold sticky top-0 z-50 shadow-lg flex items-center justify-center gap-2 animate-pulse"><AlertTriangle className="w-6 h-6" />{authError}</div>}
+      {notification && <div className={`fixed top-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg text-white font-medium animate-bounce flex items-center gap-2 ${notification.type === 'error' ? 'bg-red-500' : 'bg-green-600'}`}>{notification.type === 'error' ? <XCircle className="w-5 h-5"/> : <Check className="w-5 h-5"/>}{notification.message}</div>}
 
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
