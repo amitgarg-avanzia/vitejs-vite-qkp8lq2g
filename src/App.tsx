@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
@@ -14,6 +14,10 @@ import {
   deleteDoc, 
   updateDoc,
   doc, 
+  orderBy,
+  limit,
+  where,
+  getDocs
 } from 'firebase/firestore';
 import { 
   Plus, 
@@ -27,21 +31,18 @@ import {
   Briefcase,
   File,
   AlertTriangle,
-  RefreshCw,
   Loader2,
   Table,
   XCircle,
   Pencil,
-  Calendar,
   User
 } from 'lucide-react';
 
 /**
  * AVANZIA GLOBAL - EXPENSE TRACKER
- * VERSION: Production v1.17 (Partner-wise Summary & PDF Fixes)
+ * VERSION: Production Sandbox (On-Demand Fetching & PDF Fixes)
  */
 
-// --- 1. CONFIGURATION ---
 const firebaseConfig = {
   apiKey: "AIzaSyDHxgB2sQWOEZGsGMGjzUg8Hw_S5e3JoiM",
   authDomain: "avanzia-tracker.firebaseapp.com",
@@ -72,7 +73,6 @@ const CATEGORIES = [
 ];
 const PAYMENT_MODES = ["Paid by Company Credit Card", "Paid by Company Bank Account", "Paid by Self / Partner"];
 
-// --- 2. INITIALIZATION ---
 let app, auth, db;
 try {
   app = initializeApp(firebaseConfig);
@@ -82,14 +82,12 @@ try {
   console.error("Firebase Init Error:", error);
 }
 
-// --- 3. HELPERS ---
-
 const useTailwindLoader = () => {
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    if (window.tailwind) { setReady(true); return; }
+    if ((window as any).tailwind) { setReady(true); return; }
     const existingScript = document.querySelector('script[src="https://cdn.tailwindcss.com"]');
-    const checkTailwind = () => { if (window.tailwind) { setReady(true); return true; } return false; };
+    const checkTailwind = () => { if ((window as any).tailwind) { setReady(true); return true; } return false; };
     if (existingScript) {
       const interval = setInterval(() => { if (checkTailwind()) clearInterval(interval); }, 100);
       return () => clearInterval(interval);
@@ -106,12 +104,12 @@ const useTailwindLoader = () => {
 const useExternalScripts = () => {
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    const loadScript = (src) => {
-        return new Promise((resolve, reject) => {
+    const loadScript = (src: string) => {
+        return new Promise<void>((resolve, reject) => {
             if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
             const script = document.createElement('script');
             script.src = src;
-            script.onload = resolve;
+            script.onload = () => resolve();
             script.onerror = reject;
             document.body.appendChild(script);
         });
@@ -120,7 +118,7 @@ const useExternalScripts = () => {
     const loadAll = async () => {
         try {
             await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
-            if (window.jspdf && window.jspdf.jsPDF) window.jsPDF = window.jspdf.jsPDF;
+            if ((window as any).jspdf && (window as any).jspdf.jsPDF) (window as any).jsPDF = (window as any).jspdf.jsPDF;
             await Promise.all([
                 loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.29/jspdf.plugin.autotable.min.js"),
                 loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"),
@@ -134,7 +132,8 @@ const useExternalScripts = () => {
   return loaded;
 };
 
-const base64ToUint8Array = (base64) => {
+// Robust Base64 converter to fix mobile crashing
+const base64ToUint8Array = (base64: string) => {
   try {
     if (!base64 || !base64.includes(',')) return null;
     const raw = window.atob(base64.split(',')[1]);
@@ -145,11 +144,11 @@ const base64ToUint8Array = (base64) => {
   } catch (e) { return null; }
 };
 
-const compressImage = (file) => {
-  return new Promise((resolve, reject) => {
+const compressImage = (file: File) => {
+  return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.readAsDataURL(file);
-    reader.onload = (event) => {
+    reader.onload = (event: any) => {
       const img = new Image();
       img.src = event.target.result;
       img.onload = () => {
@@ -161,9 +160,11 @@ const compressImage = (file) => {
         else { if (height > MAX_DIMENSION) { width *= MAX_DIMENSION / height; height = MAX_DIMENSION; } }
         canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext('2d');
-        ctx.fillStyle = "#FFFFFF"; ctx.fillRect(0, 0, width, height);
-        ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, 0, 0, width, height);
+        if(ctx) {
+            ctx.fillStyle = "#FFFFFF"; ctx.fillRect(0, 0, width, height);
+            ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, 0, 0, width, height);
+        }
         
         let quality = 0.8;
         let dataUrl = canvas.toDataURL('image/jpeg', quality);
@@ -178,24 +179,22 @@ const compressImage = (file) => {
   });
 };
 
-const readFileAsBase64 = (file) => {
-    return new Promise((resolve, reject) => {
+const readFileAsBase64 = (file: File) => {
+    return new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
+        reader.onload = () => resolve(reader.result as string);
         reader.onerror = error => reject(error);
         reader.readAsDataURL(file);
     });
 };
 
-const formatCurrency = (amount) => {
+const formatCurrency = (amount: number) => {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(amount);
 };
 
-// --- 4. COMPONENTS ---
-
-const Button = ({ children, onClick, variant = 'primary', className = '', disabled = false }) => {
+const Button = ({ children, onClick, variant = 'primary', className = '', disabled = false }: any) => {
   const baseStyle = "px-4 py-2 rounded-md font-medium transition-colors flex items-center justify-center gap-2 shadow-sm";
-  const variants = {
+  const variants: any = {
     primary: "bg-blue-600 text-white hover:bg-blue-700 disabled:bg-blue-300",
     secondary: "bg-white text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:bg-gray-50",
     danger: "bg-red-50 text-red-600 hover:bg-red-100",
@@ -204,27 +203,41 @@ const Button = ({ children, onClick, variant = 'primary', className = '', disabl
   return <button type="button" onClick={onClick} className={`${baseStyle} ${variants[variant]} ${className}`} disabled={disabled}>{children}</button>;
 };
 
-const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
-  const [filterType, setFilterType] = useState('client');
+const ReportsView = ({ clients, generatePDF, generateExcel, fetchMonthlyData }: any) => {
+  const [filterType, setFilterType] = useState('summary_view');
   const [selectedEntity, setSelectedEntity] = useState('');
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
+  
+  const [monthlyExpenses, setMonthlyExpenses] = useState<any[]>([]);
+  const [isLoadingMonth, setIsLoadingMonth] = useState(false);
+
+  useEffect(() => {
+      let isMounted = true;
+      const loadData = async () => {
+          setIsLoadingMonth(true);
+          const data = await fetchMonthlyData(selectedMonth);
+          if (isMounted) {
+              setMonthlyExpenses(data);
+              setIsLoadingMonth(false);
+          }
+      };
+      loadData();
+      return () => { isMounted = false; };
+  }, [selectedMonth, fetchMonthlyData]);
 
   const reportOptions = [
+      { id: 'summary_view', label: 'Executive Summary (Partner-wise)' },
+      { id: 'monthly_master', label: 'Monthly Master Report (All)' },
       { id: 'client', label: 'Client Invoice (Billable Only)' },
       { id: 'client_non_billable', label: 'Client Non-Billable Summary' },
       { id: 'client_master', label: 'Client Master (All Expenses)' },
       { id: 'partner', label: 'Partner Reimbursement (Paid by Self)' },
       { id: 'partner_master', label: 'Partner Master (All Expenses)' },
       { id: 'avanzia_general', label: 'Avanzia General Account (Consolidated)' },
-      { id: 'monthly_master', label: 'Monthly Master Report (All)' },
-      { id: 'summary_view', label: 'Executive Summary (Partner-wise)' },
   ];
 
-  // Filtering Logic
-  const reportData = expenses.filter(item => {
+  const reportData = monthlyExpenses.filter(item => {
       if (!item.date.startsWith(selectedMonth)) return false;
-
-      // Executive summary uses all data
       if (filterType === 'summary_view') return true;
 
       const safeCategory = item.category || '';
@@ -257,12 +270,9 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
 
   const totalVal = reportData.reduce((acc, curr) => acc + curr.amount, 0);
 
-  // --- Executive Summary Calculations (Partner by Partner) ---
-  const getPartnerWiseSummary = (data) => {
-      const summary = {};
-      PARTNERS.forEach(p => {
-          summary[p] = { total: 0, byCategory: {}, byMode: {} };
-      });
+  const getPartnerWiseSummary = (data: any[]) => {
+      const summary: any = {};
+      PARTNERS.forEach(p => { summary[p] = { total: 0, byCategory: {}, byMode: {} }; });
 
       data.forEach(item => {
           const p = item.partner;
@@ -276,7 +286,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
           let md = 'Other';
           if ((item.paymentMode || '').includes('Self')) md = 'Paid by Self';
           else if ((item.paymentMode || '').includes('Credit')) md = 'Credit Card';
-          else if ((item.paymentMode || '').includes('Bank')) md = 'Bank';
+          else if ((item.paymentMode || '').includes('Bank')) md = 'Bank Debit';
           summary[p].byMode[md] = (summary[p].byMode[md] || 0) + item.amount;
       });
       return summary;
@@ -286,7 +296,6 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
 
   return (
       <div className="space-y-8">
-          {/* Generator Section */}
           <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200">
               <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
                   <FileText className="w-5 h-5 text-blue-600" /> Report Generator
@@ -313,7 +322,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                           <label className="block text-sm font-medium text-gray-700 mb-1">Select {filterType.includes('client') ? 'Client' : 'Partner'}</label>
                           <select className="w-full border p-2 rounded-md bg-white" value={selectedEntity} onChange={(e) => setSelectedEntity(e.target.value)}>
                               <option value="">-- Select --</option>
-                              {filterType.includes('client') ? clients.map(c => <option key={c} value={c}>{c}</option>) : PARTNERS.map(p => <option key={p} value={p}>{p}</option>)}
+                              {filterType.includes('client') ? clients.map((c: string) => <option key={c} value={c}>{c}</option>) : PARTNERS.map(p => <option key={p} value={p}>{p}</option>)}
                           </select>
                       </div>
                   )}
@@ -326,24 +335,30 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                   </div>
                   <div className="text-right">
                       <span className="text-xs text-gray-500 uppercase font-bold block">Grand Total</span>
-                      <span className="text-xl font-bold text-gray-800">{formatCurrency(totalVal)}</span>
+                      <span className="text-xl font-bold text-gray-800">
+                          {isLoadingMonth ? <Loader2 className="w-6 h-6 animate-spin text-gray-400 inline" /> : formatCurrency(totalVal)}
+                      </span>
                   </div>
               </div>
 
               <div className="flex gap-4">
-                  <Button variant="primary" disabled={reportData.length === 0} onClick={() => generatePDF(reportData, filterType === 'summary_view' ? `Executive Summary - ${selectedMonth}` : `${filterType.toUpperCase()} Report - ${selectedMonth}`)}>
+                  <Button variant="primary" disabled={reportData.length === 0 || isLoadingMonth} onClick={() => generatePDF(reportData, filterType === 'summary_view' ? `Executive Summary - ${selectedMonth}` : `${filterType.toUpperCase()} Report - ${selectedMonth}`)}>
                       <Download className="w-4 h-4" /> Download PDF
                   </Button>
-                  <Button variant="secondary" disabled={reportData.length === 0} onClick={() => generateExcel(reportData, `Report_${filterType}_${selectedMonth}`, filterType === 'summary_view')}>
+                  <Button variant="secondary" disabled={reportData.length === 0 || isLoadingMonth} onClick={() => generateExcel(reportData, `Report_${filterType}_${selectedMonth}`, filterType === 'summary_view')}>
                       <FileText className="w-4 h-4" /> Export Excel
                   </Button>
               </div>
           </div>
           
-          {/* DYNAMIC VIEW */}
-          {filterType === 'summary_view' ? (
+          {isLoadingMonth ? (
+               <div className="bg-white p-12 rounded-xl shadow-md border border-gray-200 flex flex-col items-center justify-center">
+                   <Loader2 className="w-10 h-10 animate-spin text-blue-500 mb-4" />
+                   <p className="text-gray-500 font-medium">Fetching secure data for {selectedMonth}...</p>
+               </div>
+          ) : filterType === 'summary_view' ? (
               <div className="grid grid-cols-1 gap-6">
-                  {Object.entries(partnerSummary).map(([partnerName, data]) => {
+                  {Object.entries(partnerSummary).map(([partnerName, data]: any) => {
                       if (data.total === 0) return null;
                       return (
                           <div key={partnerName} className="bg-white p-5 rounded-xl shadow-md border border-gray-200">
@@ -358,7 +373,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                                       <h4 className="text-xs font-bold text-gray-500 uppercase mb-2">By Category</h4>
                                       <table className="w-full text-sm">
                                           <tbody>
-                                              {Object.entries(data.byCategory).map(([k, v]) => (
+                                              {Object.entries(data.byCategory).map(([k, v]: any) => (
                                                   <tr key={k} className="border-b last:border-0 border-gray-100"><td className="py-1 text-gray-600">{k}</td><td className="py-1 text-right font-medium">{formatCurrency(v)}</td></tr>
                                               ))}
                                           </tbody>
@@ -368,7 +383,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                                       <h4 className="text-xs font-bold text-gray-500 uppercase mb-2">By Payment Mode</h4>
                                       <table className="w-full text-sm">
                                           <tbody>
-                                              {Object.entries(data.byMode).map(([k, v]) => (
+                                              {Object.entries(data.byMode).map(([k, v]: any) => (
                                                   <tr key={k} className="border-b last:border-0 border-gray-100"><td className="py-1 text-gray-600">{k}</td><td className="py-1 text-right font-medium">{formatCurrency(v)}</td></tr>
                                               ))}
                                           </tbody>
@@ -382,7 +397,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
               </div>
           ) : (
               <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 overflow-hidden">
-                  <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2"><Table className="w-5 h-5 text-gray-600" /> Expense List</h3>
+                  <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2"><Table className="w-5 h-5 text-gray-600" /> Expense List ({reportData.length})</h3>
                   <div className="overflow-x-auto">
                     <table className="min-w-full text-sm text-left">
                         <thead className="bg-gray-50 border-b">
@@ -398,14 +413,14 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
                         </thead>
                         <tbody className="divide-y">
                             {reportData.length === 0 ? (
-                                <tr><td colSpan="7" className="p-8 text-center text-gray-500">No records match current filters.</td></tr>
+                                <tr><td colSpan={7} className="p-8 text-center text-gray-500">No records match current filters.</td></tr>
                             ) : (
                                 reportData.map(item => (
                                     <tr key={item.id} className="hover:bg-gray-50 transition-colors">
                                         <td className="px-4 py-3">{item.date}</td>
                                         <td className="px-4 py-3">{item.partner}</td>
                                         <td className="px-4 py-3">{item.client || '-'}</td>
-                                        <td className="px-4 py-3">{item.head}</td>
+                                        <td className="px-4 py-3 truncate max-w-xs" title={item.head}>{item.head}</td>
                                         <td className="px-4 py-3 text-xs">{item.paymentMode.includes('Self') ? 'Self' : item.paymentMode.includes('Credit') ? 'Credit Card' : 'Bank'}</td>
                                         <td className="px-4 py-3 text-xs uppercase text-gray-500">{item.category.replace('_', ' ')}</td>
                                         <td className="px-4 py-3 text-right font-mono font-medium">{formatCurrency(item.amount)}</td>
@@ -421,7 +436,7 @@ const ReportsView = ({ expenses, clients, generatePDF, generateExcel }) => {
   );
 };
 
-const AdminView = ({ clients, expenses, handleAddClient, handleDelete, generateExcel, onEdit }) => {
+const AdminView = ({ clients, expenses, handleAddClient, handleDelete, handleFullMasterExport, onEdit, isExportingFull }: any) => {
   const [newClient, setNewClient] = useState("");
   return (
       <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 max-w-2xl mx-auto">
@@ -429,32 +444,40 @@ const AdminView = ({ clients, expenses, handleAddClient, handleDelete, generateE
           <div className="mb-8">
               <h3 className="font-semibold text-gray-700 mb-3">Client Management</h3>
               <div className="flex gap-2 mb-4"><input type="text" placeholder="New Client Name" className="flex-1 border p-2 rounded-md bg-white" value={newClient} onChange={(e) => setNewClient(e.target.value)} /><Button onClick={() => {handleAddClient(newClient); setNewClient("");}}>Add Client</Button></div>
-              <div className="flex flex-wrap gap-2">{clients.map(c => <span key={c} className="bg-blue-50 text-blue-700 px-3 py-1 rounded-full text-sm border border-blue-100">{c}</span>)}</div>
+              <div className="flex flex-wrap gap-2">{clients.map((c: string) => <span key={c} className="bg-blue-50 text-blue-700 px-3 py-1 rounded-full text-sm border border-blue-100">{c}</span>)}</div>
           </div>
           <div>
-              <h3 className="font-semibold text-gray-700 mb-3">All Expense Records (Master List)</h3>
+              <div className="flex justify-between items-center mb-3">
+                  <h3 className="font-semibold text-gray-700">Recent Expense Records</h3>
+                  <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-1 rounded border border-yellow-200">Showing Last 200 Entries (Optimized)</span>
+              </div>
               <div className="border rounded-md overflow-hidden max-h-96 overflow-y-auto">
                   <table className="min-w-full text-xs">
                       <thead className="bg-gray-100 sticky top-0"><tr><th className="p-2 text-left">Date</th><th className="p-2 text-left">Client</th><th className="p-2 text-right">Amount</th><th className="p-2 text-center">Actions</th></tr></thead>
-                      <tbody className="divide-y">{expenses.map(exp => (<tr key={exp.id} className="hover:bg-gray-50"><td className="p-2">{exp.date}</td><td className="p-2">{exp.client || 'General'}</td><td className="p-2 text-right">{formatCurrency(exp.amount)}</td><td className="p-2 text-center flex justify-center gap-2"><button onClick={() => onEdit(exp)} className="text-blue-500 hover:text-blue-700"><Pencil className="w-4 h-4" /></button><button onClick={() => handleDelete(exp.id)} className="text-red-500 hover:text-red-700"><Trash2 className="w-4 h-4" /></button></td></tr>))}</tbody>
+                      <tbody className="divide-y">{expenses.map((exp: any) => (<tr key={exp.id} className="hover:bg-gray-50"><td className="p-2">{exp.date}</td><td className="p-2">{exp.client || 'General'}</td><td className="p-2 text-right">{formatCurrency(exp.amount)}</td><td className="p-2 text-center flex justify-center gap-2"><button onClick={() => onEdit(exp)} className="text-blue-500 hover:text-blue-700"><Pencil className="w-4 h-4" /></button><button onClick={() => handleDelete(exp.id)} className="text-red-500 hover:text-red-700"><Trash2 className="w-4 h-4" /></button></td></tr>))}</tbody>
                   </table>
               </div>
-              <div className="mt-4"><Button variant="outline" className="w-full" onClick={() => generateExcel(expenses, "Master_Export")}><Download className="w-4 h-4" /> Download Complete Master Data (Excel)</Button></div>
+              <div className="mt-4">
+                  <Button variant="outline" className="w-full bg-green-50 text-green-700 border-green-200 hover:bg-green-100" onClick={handleFullMasterExport} disabled={isExportingFull}>
+                      {isExportingFull ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />} 
+                      {isExportingFull ? "Fetching Secure Data Archive..." : "Download ALL Historical Data (Full Master Export)"}
+                  </Button>
+              </div>
           </div>
       </div>
   );
 };
 
-// --- 5. MAIN APP ---
 export default function AvanziaExpenseTracker() {
-  const [user, setUser] = useState(null);
-  const [authError, setAuthError] = useState(null);
+  const [user, setUser] = useState<any>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('entry');
-  const [expenses, setExpenses] = useState([]);
+  const [recentExpenses, setRecentExpenses] = useState<any[]>([]); 
   const [clients, setClients] = useState(INITIAL_CLIENTS);
   const [loading, setLoading] = useState(false);
-  const [notification, setNotification] = useState(null);
-  const [editingId, setEditingId] = useState(null);
+  const [isExportingFull, setIsExportingFull] = useState(false);
+  const [notification, setNotification] = useState<any>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   
   const stylesLoaded = useTailwindLoader(); 
   const libsLoaded = useExternalScripts();
@@ -462,14 +485,14 @@ export default function AvanziaExpenseTracker() {
   const initialFormState = {
     partner: PARTNERS[0], client: "", head: EXPENSE_HEADS[0], date: new Date().toISOString().split('T')[0],
     amount: "", gstAmount: "", description: "", category: CATEGORIES[0].id, paymentMode: PAYMENT_MODES[2],
-    receiptImage: null, missingReceiptReason: ""
+    receiptImage: null as string | null, missingReceiptReason: ""
   };
   const [formData, setFormData] = useState(initialFormState);
 
   useEffect(() => {
     if (!auth) return;
     const initAuth = async () => { 
-      try { await signInAnonymously(auth); } catch (e) { 
+      try { await signInAnonymously(auth); } catch (e: any) { 
         console.error("Auth Error", e);
         if (e.code === 'auth/admin-restricted-operation' || e.code === 'auth/operation-not-allowed') setAuthError("ACTION REQUIRED: Enable 'Anonymous' sign-in in Firebase Console.");
         else setAuthError(`Authentication Error: ${e.message}`);
@@ -480,15 +503,20 @@ export default function AvanziaExpenseTracker() {
     return () => unsubscribe();
   }, []);
 
+  // OPTIMIZATION 1: Capped initial listener to the last 200 entries.
   useEffect(() => {
     if (!user || !db) return;
     try {
-      const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'avanzia_expenses'));
+      const q = query(
+          collection(db, 'artifacts', appId, 'public', 'data', 'avanzia_expenses'),
+          orderBy('date', 'desc'),
+          limit(100)
+      );
       const unsubExpenses = onSnapshot(q, (snapshot) => {
         const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        data.sort((a, b) => new Date(b.date) - new Date(a.date));
-        setExpenses(data);
+        setRecentExpenses(data);
       });
+
       const qClients = query(collection(db, 'artifacts', appId, 'public', 'data', 'avanzia_clients'));
       const unsubClients = onSnapshot(qClients, (snapshot) => {
         if (!snapshot.empty) {
@@ -500,12 +528,33 @@ export default function AvanziaExpenseTracker() {
     } catch(e) { console.error("Firestore Error", e); }
   }, [user]);
 
-  const showNotification = (message, type = 'success') => {
+  // OPTIMIZATION 2: Dedicated fetch for On-Demand Reporting
+  const fetchMonthlyData = useCallback(async (month: string) => {
+      if (!db || !month) return [];
+      try {
+          const startDate = `${month}-01`;
+          const endDate = `${month}-31`;
+          const q = query(
+              collection(db, 'artifacts', appId, 'public', 'data', 'avanzia_expenses'),
+              where('date', '>=', startDate),
+              where('date', '<=', endDate)
+          );
+          const snap = await getDocs(q);
+          const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+          data.sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime());
+          return data;
+      } catch (err) {
+          console.error("Error fetching month data:", err);
+          return [];
+      }
+  }, []);
+
+  const showNotification = (message: string, type = 'success') => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 5000); 
   };
 
-  const handleEdit = (expense) => {
+  const handleEdit = (expense: any) => {
       setFormData({
           partner: expense.partner, client: expense.client || "", head: expense.head, date: expense.date, amount: expense.amount,
           gstAmount: expense.gstAmount || "", description: expense.description, category: expense.category, paymentMode: expense.paymentMode,
@@ -515,7 +564,7 @@ export default function AvanziaExpenseTracker() {
       showNotification("Expense loaded for editing. Click Update when done.", "success");
   };
 
-  const handleFileUpload = async (e) => {
+  const handleFileUpload = async (e: any) => {
     const file = e.target.files[0];
     if (!file) return;
     if (file.size > 20 * 1024 * 1024) { showNotification("File too large (>20MB).", "error"); return; }
@@ -534,13 +583,13 @@ export default function AvanziaExpenseTracker() {
     } else { showNotification("Unsupported file type. Use Image or PDF.", "error"); }
   };
 
-  const handleAddClient = async (newClientName) => {
+  const handleAddClient = async (newClientName: string) => {
     if (!newClientName.trim()) return;
     try { await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'avanzia_clients'), { name: newClientName, createdAt: new Date().toISOString() }); showNotification(`Client ${newClientName} added.`); } 
     catch (err) { showNotification("Failed to add client", "error"); }
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async (e: any) => {
     e.preventDefault();
     if (!user) { showNotification("Authentication missing. Refresh page.", "error"); return; }
     if (!formData.receiptImage && !formData.missingReceiptReason) { showNotification("Please attach a bill OR provide a reason.", "error"); return; }
@@ -555,25 +604,25 @@ export default function AvanziaExpenseTracker() {
           showNotification("Expense saved successfully!"); 
       }
       setFormData(initialFormState);
-    } catch (error) { 
+    } catch (error: any) { 
         console.error("Save Error:", error);
         if (error.code === 'permission-denied') showNotification("Permission Denied: Check Firestore Rules.", "error");
         else showNotification(`Error: ${error.message}`, "error");
     } finally { setLoading(false); }
   };
 
-  const handleDelete = async (id) => {
+  const handleDelete = async (id: string) => {
     if (!window.confirm("Are you sure you want to delete this record?")) return;
     try { await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'avanzia_expenses', id)); showNotification("Record deleted."); } 
     catch (err) { showNotification("Error deleting record", "error"); }
   };
 
-  const generatePDF = async (data, title) => {
-    if (!window.jspdf || !window.PDFLib) { showNotification("Libraries loading... please wait 5s and try again.", "error"); return; }
+  const generatePDF = async (data: any[], title: string) => {
+    if (!(window as any).jspdf || !(window as any).PDFLib) { showNotification("Libraries loading... please wait 5s and try again.", "error"); return; }
     setLoading(true);
     try {
-        const { jsPDF } = window.jspdf;
-        const { PDFDocument } = window.PDFLib;
+        const { jsPDF } = (window as any).jspdf;
+        const { PDFDocument } = (window as any).PDFLib;
         const doc = new jsPDF();
         
         doc.setFontSize(18); doc.setTextColor(41, 50, 65); doc.text("Avanzia Global Private Limited", 14, 20);
@@ -581,10 +630,8 @@ export default function AvanziaExpenseTracker() {
         
         let startY = 40;
 
-        // EXECUTIVE SUMMARY HANDLING (PARTNER BY PARTNER)
         if (title.includes("Executive Summary")) {
-             // Calculate summary manually here so we have access to it
-             const partnerSummary = {};
+             const partnerSummary: any = {};
              PARTNERS.forEach(p => { partnerSummary[p] = { total: 0, byCategory: {}, byMode: {} }; });
              data.forEach(item => {
                  const p = item.partner;
@@ -595,26 +642,24 @@ export default function AvanziaExpenseTracker() {
                  let md = 'Other';
                  if ((item.paymentMode || '').includes('Self')) md = 'Paid by Self';
                  else if ((item.paymentMode || '').includes('Credit')) md = 'Credit Card';
-                 else if ((item.paymentMode || '').includes('Bank')) md = 'Bank';
+                 else if ((item.paymentMode || '').includes('Bank')) md = 'Bank Debit';
                  partnerSummary[p].byMode[md] = (partnerSummary[p].byMode[md] || 0) + item.amount;
              });
 
-             Object.entries(partnerSummary).forEach(([partner, summary]) => {
+             Object.entries(partnerSummary).forEach(([partner, summary]: any) => {
                  if (summary.total === 0) return;
-                 
-                 // Check page break
                  if (startY > 250) { doc.addPage(); startY = 20; }
                  
                  doc.setFontSize(14); doc.setTextColor(0);
                  doc.text(`${partner} - Total: ${formatCurrency(summary.total)}`, 14, startY);
                  startY += 8;
 
-                 const rows = [];
-                 Object.entries(summary.byCategory).forEach(([cat, amt]) => rows.push([cat, formatCurrency(amt)]));
+                 const rows: any[] = [];
+                 Object.entries(summary.byCategory).forEach(([cat, amt]: any) => rows.push([cat, formatCurrency(amt)]));
                  rows.push(['---', '---']);
-                 Object.entries(summary.byMode).forEach(([mode, amt]) => rows.push([mode, formatCurrency(amt)]));
+                 Object.entries(summary.byMode).forEach(([mode, amt]: any) => rows.push([mode, formatCurrency(amt)]));
 
-                 doc.autoTable({
+                 (doc as any).autoTable({
                      head: [['Category / Mode', 'Amount']],
                      body: rows,
                      startY: startY,
@@ -622,23 +667,21 @@ export default function AvanziaExpenseTracker() {
                      styles: { fontSize: 10 },
                      headStyles: { fillColor: [100, 100, 100] }
                  });
-                 startY = doc.lastAutoTable.finalY + 15;
+                 startY = (doc as any).lastAutoTable.finalY + 15;
              });
-
              doc.save(`${title.replace(/\s+/g, '_')}.pdf`);
              setLoading(false);
              return;
         }
 
-        // STANDARD REPORTS (Details + Subtotals)
-        const sumBy = (fn) => data.filter(fn).reduce((a, c) => a + c.amount, 0);
+        const sumBy = (fn: any) => data.filter(fn).reduce((a, c) => a + c.amount, 0);
 
         if (title.includes("PARTNER_MASTER") || title.includes("MONTHLY_MASTER")) {
             doc.setFontSize(10); doc.setTextColor(50);
-            const billable = sumBy(i => (i.category || '') === 'billable');
-            const nonBillable = sumBy(i => (i.category || '') === 'non_billable');
-            const genAccount = sumBy(i => (i.category || '').includes('general'));
-            const partnerAccount = sumBy(i => (i.category || '').includes('partner') && !(i.category || '').includes('general'));
+            const billable = sumBy((i: any) => (i.category || '') === 'billable');
+            const nonBillable = sumBy((i: any) => (i.category || '') === 'non_billable');
+            const genAccount = sumBy((i: any) => (i.category || '').includes('general'));
+            const partnerAccount = sumBy((i: any) => (i.category || '').includes('partner') && !(i.category || '').includes('general'));
             
             doc.text("Category Breakdown:", 14, startY);
             doc.text(`- Billable: ${formatCurrency(billable)}`, 20, startY + 5);
@@ -646,9 +689,9 @@ export default function AvanziaExpenseTracker() {
             doc.text(`- Avanzia Gen: ${formatCurrency(genAccount)}`, 80, startY + 5);
             doc.text(`- Partner Account: ${formatCurrency(partnerAccount)}`, 80, startY + 10);
             startY += 20;
-            const self = sumBy(i => (i.paymentMode || '').includes('Self'));
-            const credit = sumBy(i => (i.paymentMode || '').includes('Credit'));
-            const bank = sumBy(i => (i.paymentMode || '').includes('Bank'));
+            const self = sumBy((i: any) => (i.paymentMode || '').includes('Self'));
+            const credit = sumBy((i: any) => (i.paymentMode || '').includes('Credit'));
+            const bank = sumBy((i: any) => (i.paymentMode || '').includes('Bank'));
             doc.text("Payment Mode Breakdown:", 14, startY);
             doc.text(`- Self: ${formatCurrency(self)}`, 20, startY + 5);
             doc.text(`- Credit Card: ${formatCurrency(credit)}`, 80, startY + 5);
@@ -657,7 +700,7 @@ export default function AvanziaExpenseTracker() {
         }
 
         const tableColumn = ["Date", "Partner", "Client", "Head", "Mode", "Desc", "Amount"];
-        const tableRows = [];
+        const tableRows: any[] = [];
         let totalAmount = 0;
         data.forEach(item => {
             totalAmount += item.amount;
@@ -674,9 +717,10 @@ export default function AvanziaExpenseTracker() {
         });
         tableRows.push(["", "", "", "", "", "TOTAL", formatCurrency(totalAmount)]);
         
-        doc.autoTable({ head: [tableColumn], body: tableRows, startY: startY, theme: 'grid', styles: { fontSize: 8 }, headStyles: { fillColor: [66, 133, 244] } });
+        if ((doc as any).autoTable) {
+            (doc as any).autoTable({ head: [tableColumn], body: tableRows, startY: startY, theme: 'grid', styles: { fontSize: 8 }, headStyles: { fillColor: [66, 133, 244] } });
+        }
         
-        // Image Processing Logic (Same as before)
         const tablePdfBytes = doc.output('arraybuffer');
         const finalPdf = await PDFDocument.load(tablePdfBytes);
         
@@ -691,7 +735,7 @@ export default function AvanziaExpenseTracker() {
                 if (isPdf) {
                     const receiptPdf = await PDFDocument.load(imageBytes);
                     const copiedPages = await finalPdf.copyPages(receiptPdf, receiptPdf.getPageIndices());
-                    copiedPages.forEach((page) => finalPdf.addPage(page));
+                    copiedPages.forEach((page: any) => finalPdf.addPage(page));
                 } else {
                     let imageToEmbed;
                     if (isPng) imageToEmbed = await finalPdf.embedPng(imageBytes);
@@ -711,16 +755,15 @@ export default function AvanziaExpenseTracker() {
         const blob = new Blob([pdfBytes], { type: "application/pdf" });
         const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `${title.replace(/\s+/g, '_')}.pdf`; link.click();
         showNotification("PDF Report Generated!");
-    } catch (err) { console.error(err); showNotification(`Error: ${err.message}`, "error"); } finally { setLoading(false); }
+    } catch (err: any) { console.error(err); showNotification(`Error: ${err.message}`, "error"); } finally { setLoading(false); }
   };
 
-  const generateExcel = (data, filename, isSummary = false) => {
-    if (!window.XLSX) { showNotification("Excel Library loading... wait 5s.", "error"); return; }
-    const XLSX = window.XLSX;
+  const generateExcel = (data: any[], filename: string, isSummary = false) => {
+    if (!(window as any).XLSX) { showNotification("Excel Library loading... wait 5s.", "error"); return; }
+    const XLSX = (window as any).XLSX;
     
-    // Logic for Summary View Excel
     if (isSummary) {
-         const partnerSummary = {};
+         const partnerSummary: any = {};
          PARTNERS.forEach(p => { partnerSummary[p] = { total: 0, byCategory: {}, byMode: {} }; });
          data.forEach(item => {
              const p = item.partner;
@@ -731,12 +774,12 @@ export default function AvanziaExpenseTracker() {
              let md = 'Other';
              if ((item.paymentMode || '').includes('Self')) md = 'Paid by Self';
              else if ((item.paymentMode || '').includes('Credit')) md = 'Credit Card';
-             else if ((item.paymentMode || '').includes('Bank')) md = 'Bank';
+             else if ((item.paymentMode || '').includes('Bank')) md = 'Bank Debit';
              partnerSummary[p].byMode[md] = (partnerSummary[p].byMode[md] || 0) + item.amount;
          });
 
-         const rows = [];
-         Object.entries(partnerSummary).forEach(([partner, summary]) => {
+         const rows: any[] = [];
+         Object.entries(partnerSummary).forEach(([partner, summary]: any) => {
              if (summary.total === 0) return;
              rows.push({ Partner: partner, Category: 'TOTAL', Amount: summary.total });
              Object.entries(summary.byCategory).forEach(([k, v]) => rows.push({ Partner: '', Category: k, Amount: v }));
@@ -758,25 +801,41 @@ export default function AvanziaExpenseTracker() {
     }));
 
     if (filename.includes("Partner_Master") || filename.includes("Monthly_Master") || filename.includes("Client_Master")) {
-        const sumBy = (fn) => data.filter(fn).reduce((a, c) => a + c.amount, 0);
+        const sumBy = (fn: any) => data.filter(fn).reduce((a, c) => a + c.amount, 0);
         rowData.push({}); 
         rowData.push({ Description: "--- CATEGORY BREAKDOWN ---" });
-        rowData.push({ Description: "Client Billable", Amount: sumBy(i => (i.category || '') === 'billable') });
-        rowData.push({ Description: "Client Non-Billable", Amount: sumBy(i => (i.category || '') === 'non_billable') });
-        rowData.push({ Description: "Avanzia Gen. Account", Amount: sumBy(i => (i.category || '').includes('general')) });
-        rowData.push({ Description: "Partner Account", Amount: sumBy(i => (i.category || '').includes('partner') && !(i.category || '').includes('general')) });
+        rowData.push({ Description: "Client Billable", Amount: sumBy((i: any) => (i.category || '') === 'billable') });
+        rowData.push({ Description: "Client Non-Billable", Amount: sumBy((i: any) => (i.category || '') === 'non_billable') });
+        rowData.push({ Description: "Avanzia Gen. Account", Amount: sumBy((i: any) => (i.category || '').includes('general')) });
+        rowData.push({ Description: "Partner Account", Amount: sumBy((i: any) => (i.category || '').includes('partner') && !(i.category || '').includes('general')) });
         rowData.push({}); 
         rowData.push({ Description: "--- PAYMENT MODE BREAKDOWN ---" });
-        rowData.push({ Description: "Paid by Self", Amount: sumBy(i => (i.paymentMode || '').includes('Self')) });
-        rowData.push({ Description: "Paid by Company (Bank)", Amount: sumBy(i => (i.paymentMode || '').includes('Bank')) });
-        rowData.push({ Description: "Paid by Company (Credit Card)", Amount: sumBy(i => (i.paymentMode || '').includes('Credit')) });
+        rowData.push({ Description: "Paid by Self", Amount: sumBy((i: any) => (i.paymentMode || '').includes('Self')) });
+        rowData.push({ Description: "Paid by Company (Bank)", Amount: sumBy((i: any) => (i.paymentMode || '').includes('Bank')) });
+        rowData.push({ Description: "Paid by Company (Credit Card)", Amount: sumBy((i: any) => (i.paymentMode || '').includes('Credit')) });
     }
 
     const ws = XLSX.utils.json_to_sheet(rowData);
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Expenses"); XLSX.writeFile(wb, `${filename}.xlsx`);
   };
 
-  // ... (Rest of component remains the same)
+  // OPTIMIZATION 3: Full Background Export 
+  const handleFullMasterExport = async () => {
+      setIsExportingFull(true);
+      try {
+          showNotification("Fetching all historical data securely. This may take a moment...", "success");
+          const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'avanzia_expenses'), orderBy('date', 'desc'));
+          const snap = await getDocs(q);
+          const allData = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+          generateExcel(allData, "Complete_Historical_Master_Export");
+          showNotification("Historical data downloaded successfully.");
+      } catch(e) {
+          console.error("Export error", e);
+          showNotification("Error downloading full history.", "error");
+      } finally {
+          setIsExportingFull(false);
+      }
+  };
 
   const renderEntryForm = () => (
     <div className="bg-white rounded-xl shadow-md border border-gray-100 p-6 max-w-4xl mx-auto">
@@ -789,17 +848,17 @@ export default function AvanziaExpenseTracker() {
       </div>
       <form onSubmit={handleSubmit} className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div><label className="block text-sm font-medium text-gray-700 mb-1">Partner Name</label><select required className="w-full border border-gray-300 p-2 rounded-lg bg-white" value={formData.partner} onChange={e => setFormData({...formData, partner: e.target.value})}>{PARTNERS.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
-          <div><label className="block text-sm font-medium text-gray-700 mb-1">Expense Date</label><input type="date" required className="w-full border border-gray-300 p-2 rounded-lg" value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} /></div>
-          <div><label className="block text-sm font-medium text-gray-700 mb-1">Client (If Applicable)</label><select className="w-full border border-gray-300 p-2 rounded-lg bg-white" value={formData.client} onChange={e => setFormData({...formData, client: e.target.value})}><option value="">-- General / No Client --</option>{clients.map(c => <option key={c} value={c}>{c}</option>)}</select></div>
-          <div><label className="block text-sm font-medium text-gray-700 mb-1">Expense Head</label><select required className="w-full border border-gray-300 p-2 rounded-lg bg-white" value={formData.head} onChange={e => setFormData({...formData, head: e.target.value})}>{EXPENSE_HEADS.map(h => <option key={h} value={h}>{h}</option>)}</select></div>
-          <div><label className="block text-sm font-medium text-gray-700 mb-1">Total Bill Amount (INR)</label><input type="number" step="0.01" required className="w-full border border-gray-300 p-2 rounded-lg" value={formData.amount} onChange={e => setFormData({...formData, amount: e.target.value})} /></div>
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">Partner Name</label><select required className="w-full border p-2 rounded-lg bg-white" value={formData.partner} onChange={e => setFormData({...formData, partner: e.target.value})}>{PARTNERS.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">Expense Date</label><input type="date" required className="w-full border p-2 rounded-lg bg-white" value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} /></div>
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">Client (If Applicable)</label><select className="w-full border p-2 rounded-lg bg-white" value={formData.client} onChange={e => setFormData({...formData, client: e.target.value})}><option value="">-- General / No Client --</option>{clients.map(c => <option key={c} value={c}>{c}</option>)}</select></div>
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">Expense Head</label><select required className="w-full border p-2 rounded-lg bg-white" value={formData.head} onChange={e => setFormData({...formData, head: e.target.value})}>{EXPENSE_HEADS.map(h => <option key={h} value={h}>{h}</option>)}</select></div>
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">Total Bill Amount (INR)</label><input type="number" step="0.01" required className="w-full border p-2 rounded-lg bg-white" value={formData.amount} onChange={e => setFormData({...formData, amount: e.target.value})} /></div>
           {(formData.category.includes('partner') || formData.paymentMode.includes('Self')) && (
             <div className="bg-blue-50 p-3 rounded-md border border-blue-200"><label className="block text-xs font-bold text-blue-800 uppercase mb-1">GST Component</label><input type="number" step="0.01" className="w-full border border-blue-200 p-2 text-sm rounded bg-white" value={formData.gstAmount} onChange={e => setFormData({...formData, gstAmount: e.target.value})} /></div>
           )}
-          <div className="md:col-span-2"><label className="block text-sm font-medium text-gray-700 mb-1">Description</label><input type="text" required className="w-full border border-gray-300 p-2 rounded-lg" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} /></div>
-          <div><label className="block text-sm font-medium text-gray-700 mb-1">Expense Category</label><select required className="w-full border border-gray-300 p-2 rounded-lg bg-white" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})}>{CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}</select></div>
-          <div><label className="block text-sm font-medium text-gray-700 mb-1">Payment Method</label><select required className="w-full border border-gray-300 p-2 rounded-lg bg-white" value={formData.paymentMode} onChange={e => setFormData({...formData, paymentMode: e.target.value})}>{PAYMENT_MODES.map(m => <option key={m} value={m}>{m}</option>)}</select></div>
+          <div className="md:col-span-2"><label className="block text-sm font-medium text-gray-700 mb-1">Description</label><input type="text" required className="w-full border p-2 rounded-lg bg-white" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} /></div>
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">Expense Category</label><select required className="w-full border p-2 rounded-lg bg-white" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})}>{CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}</select></div>
+          <div><label className="block text-sm font-medium text-gray-700 mb-1">Payment Method</label><select required className="w-full border p-2 rounded-lg bg-white" value={formData.paymentMode} onChange={e => setFormData({...formData, paymentMode: e.target.value})}>{PAYMENT_MODES.map(m => <option key={m} value={m}>{m}</option>)}</select></div>
           <div className="md:col-span-2 border-t border-gray-200 pt-4">
             <label className="block text-sm font-medium text-gray-700 mb-2">Supporting Document</label>
             <div className="flex flex-col md:flex-row gap-4 items-start">
@@ -808,7 +867,11 @@ export default function AvanziaExpenseTracker() {
             </div>
           </div>
         </div>
-        <div className="pt-4 flex justify-end"><Button onClick={handleSubmit} disabled={loading} className={`w-full md:w-auto ${editingId ? 'bg-orange-600 hover:bg-orange-700' : ''}`}>{loading ? "Saving..." : (editingId ? "Update Expense Record" : "Save Expense Record")}</Button></div>
+        <div className="pt-4 flex justify-end">
+            <Button onClick={handleSubmit} disabled={loading} className={`w-full md:w-auto ${editingId ? 'bg-orange-600 hover:bg-orange-700' : ''}`}>
+                {loading ? "Saving..." : (editingId ? "Update Expense Record" : "Save Expense Record")}
+            </Button>
+        </div>
       </form>
     </div>
   );
@@ -831,8 +894,8 @@ export default function AvanziaExpenseTracker() {
       <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 z-50 flex justify-around p-2 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)]">{[{ id: 'entry', icon: Plus, label: 'Add' }, { id: 'reports', icon: PieChart, label: 'Reports' }, { id: 'admin', icon: Settings, label: 'Admin' }].map(item => (<button key={item.id} onClick={() => setActiveTab(item.id)} className={`flex flex-col items-center p-2 rounded-md ${activeTab === item.id ? 'text-blue-600' : 'text-gray-400'}`}><item.icon className="w-6 h-6" /><span className="text-xs mt-1">{item.label}</span></button>))}</div>
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {activeTab === 'entry' && renderEntryForm()}
-        {activeTab === 'reports' && <ReportsView expenses={expenses} clients={clients} generatePDF={generatePDF} generateExcel={generateExcel} />}
-        {activeTab === 'admin' && <AdminView clients={clients} expenses={expenses} handleAddClient={handleAddClient} handleDelete={handleDelete} generateExcel={generateExcel} onEdit={handleEdit} />}
+        {activeTab === 'reports' && <ReportsView clients={clients} generatePDF={generatePDF} generateExcel={generateExcel} fetchMonthlyData={fetchMonthlyData} />}
+        {activeTab === 'admin' && <AdminView clients={clients} expenses={recentExpenses} handleAddClient={handleAddClient} handleDelete={handleDelete} handleFullMasterExport={handleFullMasterExport} isExportingFull={isExportingFull} onEdit={handleEdit} />}
       </main>
     </div>
   );
